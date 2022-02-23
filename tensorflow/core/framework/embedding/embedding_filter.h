@@ -3,6 +3,11 @@
 
 //#include "tensorflow/core/framework/embedding/embedding_var.h"
 #include "tensorflow/core/framework/embedding/embedding_config.h"
+#if GOOGLE_CUDA
+#if !TF_ENABLE_GPU_EV
+#include "tensorflow/core/framework/embedding/batch.h"
+#endif  // TF_ENABLE_GPU_EV
+#endif  // GOOGLE_CUDA
 
 namespace tensorflow {
 namespace embedding{
@@ -44,17 +49,19 @@ template<typename K, typename V, typename EV>
 class EmbeddingFilter {
  public:
   virtual void LookupOrCreate(K key, V* val, const V* default_value_ptr,
-                               ValuePtr<V>** value_ptr, int count) = 0;
+    ValuePtr<V>** value_ptr, int count) = 0;
   virtual Status LookupOrCreateKey(K key, ValuePtr<V>** val, bool* is_filter) = 0;
+  virtual void CreateGPUBatch(V* val_base, V** default_values, int64 size,
+    int64 slice_elems, int64 value_len_, bool* init_flags, V** memcpy_address) = 0;
 
   virtual int64 GetFreq(K key, ValuePtr<V>* value_ptr) = 0;
   virtual int64 GetFreq(K key) = 0;
   virtual Status Import(RestoreBuffer& restore_buff,
-                int64 key_num,
-                int bucket_num,
-                int64 partition_id,
-                int64 partition_num,
-                bool is_filter) = 0;
+    int64 key_num,
+    int bucket_num,
+    int64 partition_id,
+    int64 partition_num,
+    bool is_filter) = 0;
 };
 
 template<typename K, typename V, typename EV>
@@ -87,7 +94,7 @@ class BloomFilter : public EmbeddingFilter<K, V, EV> {
   }
 
   void LookupOrCreate(K key, V* val, const V* default_value_ptr,
-                       ValuePtr<V>** value_ptr, int count) override {
+                      ValuePtr<V>** value_ptr, int count) override {
     if (GetBloomFreq(key) >= config_.filter_freq) {
       TF_CHECK_OK(ev_->LookupOrCreateKey(key, value_ptr));
       V* mem_val = ev_->LookupOrCreateEmb(*value_ptr, default_value_ptr);
@@ -96,6 +103,10 @@ class BloomFilter : public EmbeddingFilter<K, V, EV> {
       AddFreq(key, count);
       memcpy(val, default_value_ptr, sizeof(V) * ev_->ValueLen());
     }
+  }
+
+  void CreateGPUBatch(V* val_base, V** default_values, int64 size,
+    int64 slice_elems, int64 value_len_, bool* init_flags, V** memcpy_address) {
   }
 
   Status LookupOrCreateKey(K key, ValuePtr<V>** val, bool* is_filter) override {
@@ -233,7 +244,7 @@ class BloomFilter : public EmbeddingFilter<K, V, EV> {
           new_freq = config_.filter_freq;
         }
       } else {
-        SetBloomFreq(key_buff[i], freq_buff[i]); 
+        SetBloomFreq(key_buff[i], freq_buff[i]);
       }
       if (new_freq >= config_.filter_freq){
         TF_CHECK_OK(ev_->LookupOrCreateKey(key_buff[i], &value_ptr));
@@ -360,8 +371,7 @@ class CounterFilter : public EmbeddingFilter<K, V, EV> {
   }
 
   void LookupOrCreate(K key, V* val, const V* default_value_ptr,
-                      ValuePtr<V>** value_ptr,
-                       int count) override {
+                      ValuePtr<V>** value_ptr, int count) override {
     TF_CHECK_OK(ev_->LookupOrCreateKey(key, value_ptr));
     if (GetFreq(key, *value_ptr) >= config_.filter_freq) {
       V* mem_val = ev_->LookupOrCreateEmb(*value_ptr, default_value_ptr);
@@ -369,6 +379,11 @@ class CounterFilter : public EmbeddingFilter<K, V, EV> {
     } else {
       memcpy(val, default_value_ptr, sizeof(V) * ev_->ValueLen());
     }
+  }
+
+
+  void CreateGPUBatch(V* val_base, V** default_values, int64 size,
+    int64 slice_elems, int64 value_len_, bool* init_flags, V** memcpy_address) {
   }
 
   Status LookupOrCreateKey(K key, ValuePtr<V>** val, bool* is_filter) override {
@@ -408,18 +423,17 @@ class CounterFilter : public EmbeddingFilter<K, V, EV> {
       if (!is_filter) {
         if (freq_buff[i] >= config_.filter_freq) {
           value_ptr->SetFreq(freq_buff[i]);
-        }else {
+        } else {
           value_ptr->SetFreq(config_.filter_freq);
         }
-      }else {
-        value_ptr->SetFreq(freq_buff[i]); 
+      } else {
+        value_ptr->SetFreq(freq_buff[i]);
       }
-        
       if (config_.steps_to_live != 0 || config_.record_version) {
         value_ptr->SetStep(version_buff[i]);
       }
-      if (value_ptr->GetFreq() >= config_.filter_freq){
-        if(!is_filter){
+      if (value_ptr->GetFreq() >= config_.filter_freq) {
+        if (!is_filter) {
            V* v = ev_->LookupOrCreateEmb(value_ptr, value_buff + i * ev_->ValueLen());
         } else {
            V* v = ev_->LookupOrCreateEmb(value_ptr, ev_->GetDefaultValue(key_buff[i]));
@@ -450,6 +464,30 @@ class NullableFilter : public EmbeddingFilter<K, V, EV> {
     TF_CHECK_OK(ev_->LookupOrCreateKey(key, value_ptr));
     V* mem_val = ev_->LookupOrCreateEmb(*value_ptr, default_value_ptr);
     memcpy(val, mem_val, sizeof(V) * ev_->ValueLen());
+  }
+
+  void CreateGPUBatch(V* val_base, V** default_values, int64 size,
+    int64 slice_elems, int64 value_len, bool* init_flags, V** memcpy_address) {
+#if GOOGLE_CUDA
+#if !TF_ENABLE_GPU_EV
+    int block_dim = 128;
+    V** dev_value_address = (V**)ev_->GetBuffer1(size);
+    V** dev_default_address = (V**)ev_->GetBuffer2(size);
+    bool* dev_init_flags = (bool*)ev_->GetBuffer3(size);
+
+    cudaMemcpy(dev_value_address, memcpy_address, sizeof(V *) * size, cudaMemcpyHostToDevice);
+    cudaMemcpy(dev_default_address, default_values, sizeof(V *) * size, cudaMemcpyHostToDevice);
+    cudaMemcpy(dev_init_flags, init_flags, sizeof(bool) * size, cudaMemcpyHostToDevice);
+
+    int limit = size;
+    int length = value_len;
+    void* args1[] = {(void*)&dev_value_address, (void*)&val_base, (void*)&length,
+                     (void*)&limit, (void*)&dev_default_address, (void*)&dev_init_flags};
+    cudaLaunchKernel((void *)BatchCopy<V>, (limit + block_dim - 1) / block_dim * length,
+                     block_dim, args1, 0, NULL);
+    cudaDeviceSynchronize();
+#endif  // TF_ENABLE_GPU_EV
+#endif  // GOOGLE_CUDA
   }
 
   Status LookupOrCreateKey(K key, ValuePtr<V>** val, bool* is_filter) override {

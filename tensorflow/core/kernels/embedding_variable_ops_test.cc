@@ -27,7 +27,10 @@
 #include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/util/tensor_slice_reader_cache.h"
+#include "tensorflow/core/common_runtime/gpu/gpu_device.h"
+#include "tensorflow/core/common_runtime/gpu/gpu_process_state.h"
 
+#include <time.h>
 #include <sys/resource.h>
 #include "tensorflow/core/framework/embedding/kv_interface.h"
 #include "tensorflow/core/framework/embedding/cache.h"
@@ -1173,6 +1176,267 @@ TEST(EmbeddingVariableTest, TestLFUCache) {
     ASSERT_EQ(evict_ids[i], (num_access % num_ids + i) % num_ids);
   }
 }
+
+void t1_gpu(KVInterface<int64, float>* hashmap) {
+  for (int i = 0; i< 100; ++i) {
+    hashmap->Insert(i, new NormalGPUValuePtr<float>(ev_allocator(), 100));
+  }
+}
+
+TEST(EmbeddingVariableTest,TestRemoveLocklessCPU) {
+    KVInterface<int64, float>* hashmap = new LocklessHashMapCPU<int64, float>();
+    ASSERT_EQ(hashmap->Size(), 0);
+    LOG(INFO) << "hashmap size: " << hashmap->Size();
+    auto t = std::thread(t1, hashmap);
+    t.join();
+    LOG(INFO) << "hashmap size: " << hashmap->Size();
+    ASSERT_EQ(hashmap->Size(), 100);
+    TF_CHECK_OK(hashmap->Remove(1));
+    TF_CHECK_OK(hashmap->Remove(2));
+    ASSERT_EQ(hashmap->Size(), 98);
+    LOG(INFO) << "2 size:" << hashmap->Size();
+}
+
+/*
+void CommitGPU(KVInterface<int64, float>* hashmap) {
+  for (int64 i = 0; i< 100; ++i) {
+    ValuePtr<float>* tmp= new NormalGPUValuePtr<float>(ev_allocator(), 100);
+    hashmap->Commit(i, tmp);
+  }
+}
+
+TEST(EmbeddingVariableTest, TestCommitHashMapCPU) {
+  KVInterface<int64, float>* hashmap = new LocklessHashMapCPU<int64, float>();
+  hashmap->SetTotalDims(100);
+  ASSERT_EQ(hashmap->Size(), 0);
+  LOG(INFO) << "hashmap size: " << hashmap->Size();
+  auto t = std::thread(CommitGPU, hashmap);
+  t.join();
+  LOG(INFO) << "hashmap size: " << hashmap->Size();
+  ASSERT_EQ(hashmap->Size(), 100);
+  TF_CHECK_OK(hashmap->Remove(1));
+  TF_CHECK_OK(hashmap->Remove(2));
+  ASSERT_EQ(hashmap->Size(), 98);
+  LOG(INFO) << "2 size:" << hashmap->Size();
+}
+
+TEST(EmbeddingVariableTest, TestGPUValuePtr) {
+  int ev_list_size = 32;
+  ValuePtr<float>* ptr_ = new NormalGPUValuePtr<float>(ev_allocator(), ev_list_size);
+  float* address = *(float **)((char *)ptr_->GetPtr() + sizeof(FixedLengthHeader));
+  float host_data[ev_list_size];
+  float initial_data[ev_list_size];
+  for(int i = 0;i < ev_list_size;++i){
+    initial_data[i] = 10;
+  }
+  for(int i = 0;i < ev_list_size;++i){
+    LOG(INFO) << i << " " << initial_data[i];
+  }
+  cudaMemcpy(address, initial_data, ev_list_size * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(host_data, address, ev_list_size * sizeof(float), cudaMemcpyDeviceToHost);
+  for(int i = 0;i < ev_list_size;++i){
+    LOG(INFO) << i << " " << host_data[i];
+  }
+}//Forbidden, due to no gpu allocator at that time
+
+TEST(EmbeddingVariableTest, TestCommitValue) {
+  int ev_list_size = 32;
+  ValuePtr<float>* ptr_ = new NormalGPUValuePtr<float>(ev_allocator(),ev_list_size);
+  float* address = *(float **)((char *)ptr_->GetPtr() + sizeof(FixedLengthHeader));
+  float initial_data[ev_list_size];
+  for(int i = 0;i < ev_list_size;++i){
+    initial_data[i] = 10;
+  }
+  cudaMemcpy(address, initial_data, ev_list_size * sizeof(float), cudaMemcpyHostToDevice);
+  KVInterface<int64, float>* hashmap = new LocklessHashMapCPU<int64, float>();
+  hashmap->SetTotalDims(ev_list_size);
+  hashmap->Commit(1, ptr_);
+  ValuePtr<float>* check;
+  hashmap->Lookup(1,&check);
+  LOG(INFO) << "hashmap size: " << hashmap->Size();
+  float* tmp = (float *)((char *)check->GetPtr() + sizeof(FixedLengthHeader));
+
+  for(int i = 0;i < ev_list_size;++i){
+    LOG(INFO) << i << " " << tmp[i];
+    //ASSERT_EQ(tmp[i], 10);
+  }//
+}
+
+TEST(EmbeddingVariableTest, TestBatchCommitofLocklessHashMapCPU) {
+  KVInterface<int64, float>* hashmap = new LocklessHashMapCPU<int64, float>();
+  const int EmbeddingSize = 16;
+  const int BatchSize = 16;
+
+  hashmap->SetTotalDims(EmbeddingSize);
+  std::vector<ValuePtr<float>*> value_ptr_list;
+  std::vector<int64> key_list;
+
+  for(int64 i = 0; i < BatchSize; i++) {
+    key_list.emplace_back(i);
+    ValuePtr<float>* ptr_ = new NormalGPUValuePtr<float>(EmbeddingSize);
+    float* address = *(float **)((char *)ptr_->GetPtr() + sizeof(FixedLengthHeader));
+    float initial_data[EmbeddingSize];
+    for(int j = 0;j < EmbeddingSize;++j){
+      initial_data[j] = i;
+      //LOG(INFO) << "initial[" << i << "][" << j << "]=" << initial_data[j];
+    }
+    cudaMemcpy(address, initial_data, EmbeddingSize * sizeof(float), cudaMemcpyHostToDevice);
+    value_ptr_list.emplace_back(ptr_);
+  }//initialize V on GPU
+
+  timespec start,end;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  hashmap->BatchCommit(key_list, value_ptr_list);
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  std::cout << "time: " << ((double)(end.tv_sec - start.tv_sec)*1000000000 + end.tv_nsec - start.tv_nsec)/1000000 << "ms" << std::endl;
+
+  for(int64 i = 0; i < BatchSize; i++) {
+    ValuePtr<float>* check;
+    hashmap->Lookup(i,&check);
+    float* tmp = (float *)((char *)check->GetPtr() + sizeof(FixedLengthHeader));
+    for(int j = 0;j < EmbeddingSize;++j){
+      LOG(INFO) << "batch[" << i << "][" << j << "]=" << tmp[j];
+      //ASSERT_EQ(tmp[j], i);
+    }
+  }//compare value after BatchCommit
+}
+*/
+
+const int total_size = 1024 * 8;
+const int th_num = 1;
+const int malloc_size = total_size / th_num;
+
+void malloc_use_allocator(Allocator* allocator){
+  timespec start;
+  timespec end;
+  float* first = (float *)allocator->AllocateRaw(0, sizeof(float));
+
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  for (int i = 0; i < malloc_size; ++i) {
+    int ev_list_size = 32;
+    float* ptr_ = (float *)allocator->AllocateRaw(0, sizeof(float) * ev_list_size);
+  }
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  LOG(INFO) << "cost time: " << ((double)(end.tv_sec - start.tv_sec)*1000000000 + end.tv_nsec - start.tv_nsec)/1000000 << "ms";
+}
+
+TEST(EmbeddingVariableTest, TestEVMalloc) {
+  std::thread th_arr[th_num];
+  for (unsigned int i = 0; i < th_num; ++i) {
+    th_arr[i] = std::thread(malloc_use_allocator, ev_allocator());
+  }
+  for (unsigned int i = 0; i < th_num; ++i) {
+    th_arr[i].join();
+  }
+}
+
+TEST(EmbeddingVariableTest, TestCPUMalloc) {
+  std::thread th_arr[th_num];
+  for (unsigned int i = 0; i < th_num; ++i) {
+    th_arr[i] = std::thread(malloc_use_allocator, cpu_allocator());
+  }
+  for (unsigned int i = 0; i < th_num; ++i) {
+    th_arr[i].join();
+  }
+}
+
+TEST(EmbeddingVariableTest, TestGPUMalloc) {
+  SessionOptions sops;
+  std::unique_ptr<Device> device = DeviceFactory::NewDevice(DEVICE_GPU, sops, "/job:a/replica:0/task:0");
+  Allocator* gpu_allocator = GPUProcessState::singleton()->GetGPUAllocator(
+        GPUOptions(), TfGpuId(0), 1 << 26);
+
+  std::thread th_arr[th_num];
+  for (unsigned int i = 0; i < th_num; ++i) {
+    th_arr[i] = std::thread(malloc_use_allocator, gpu_allocator);
+  }
+  for (unsigned int i = 0; i < th_num; ++i) {
+    th_arr[i].join();
+  }
+}
+
+
+TEST(EmbeddingVariableTest, TestCPUGPUMalloc) {
+  SessionOptions sops;
+  std::unique_ptr<Device> device = DeviceFactory::NewDevice(DEVICE_GPU, sops, "/job:a/replica:0/task:0");
+
+  Allocator* gpu_allocator = GPUProcessState::singleton()->GetGPUAllocator(
+        GPUOptions(), TfGpuId(0), 1 << 26);
+
+  timespec start;
+  timespec end;
+
+  ValuePtr<float>* ptr_1 = new NormalGPUValuePtr<float>(gpu_allocator, 32);
+
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  for (int i = 0; i < 1024 * 2; ++i) {
+    int ev_list_size = 32;
+    ValuePtr<float>* ptr_ = new NormalGPUValuePtr<float>(gpu_allocator, ev_list_size);
+  }
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  LOG(INFO) << "cost time: " << ((double)(end.tv_sec - start.tv_sec)*1000000000 + end.tv_nsec - start.tv_nsec)/1000000 << "ms";
+
+
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  for (int i = 0; i < 1024 * 2; ++i) {
+    int ev_list_size = 32;
+    ValuePtr<float>* ptr_ = new NormalValuePtr<float>(cpu_allocator(), ev_list_size);
+  }
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  LOG(INFO) << "cost time: " << ((double)(end.tv_sec - start.tv_sec)*1000000000 + end.tv_nsec - start.tv_nsec)/1000000 << "ms";
+
+
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  for (int i = 0; i < 1; ++i) {
+    int ev_list_size = 32 * 1024 * 2;
+    ValuePtr<float>* ptr_ = new NormalGPUValuePtr<float>(gpu_allocator, ev_list_size);
+  }
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  LOG(INFO) << "cost time: " << ((double)(end.tv_sec - start.tv_sec)*1000000000 + end.tv_nsec - start.tv_nsec)/1000000 << "ms";
+}
+
+void malloc_free_use_allocator(Allocator* allocator){
+  timespec start;
+  timespec end;
+  std::vector<float*> ptrs;
+  float* first = (float *)allocator->AllocateRaw(0, sizeof(float));
+
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  for (int i = 0; i < malloc_size; ++i) {
+    int ev_list_size = 32;
+    float* ptr_ = (float *)allocator->AllocateRaw(0, sizeof(float) * ev_list_size);
+    ptrs.push_back(ptr_);
+  }
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  LOG(INFO) << "first time: " << ((double)(end.tv_sec - start.tv_sec)*1000000000 + end.tv_nsec - start.tv_nsec)/1000000 << "ms";
+
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  for (auto iter = ptrs.begin();iter != ptrs.end();iter++) {
+    allocator->DeallocateRaw(*iter);
+  }
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  LOG(INFO) << "free time: " << ((double)(end.tv_sec - start.tv_sec)*1000000000 + end.tv_nsec - start.tv_nsec)/1000000 << "ms";
+
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  for (int i = 0; i < malloc_size; ++i) {
+    int ev_list_size = 32;
+    float* ptr_ = (float *)allocator->AllocateRaw(0, sizeof(float) * ev_list_size);
+  }
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  LOG(INFO) << "second time: " << ((double)(end.tv_sec - start.tv_sec)*1000000000 + end.tv_nsec - start.tv_nsec)/1000000 << "ms";
+}
+
+TEST(EmbeddingVariableTest, TestEVMallocFree) {
+  std::thread th_arr[th_num];
+  for (unsigned int i = 0; i < th_num; ++i) {
+    th_arr[i] = std::thread(malloc_free_use_allocator, ev_allocator());
+  }
+  for (unsigned int i = 0; i < th_num; ++i) {
+    th_arr[i].join();
+  }
+}
+
+
 
 } // namespace
 } // namespace embedding
