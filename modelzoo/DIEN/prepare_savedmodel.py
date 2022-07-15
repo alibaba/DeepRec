@@ -17,12 +17,13 @@ import time
 import argparse
 import tensorflow as tf
 import os
+import traceback
+import logging
 import sys
 import math
 import collections
 from tensorflow.python.client import timeline
 import json
-
 
 from tensorflow.python.ops import partitioned_variables
 
@@ -115,6 +116,7 @@ class DIEN():
                  embedding_dim=18,
                  hidden_size=36,
                  attention_size=36,
+                 cur_batch_size=1,
                  inputs=None,
                  optimizer_type='adam',
                  bf16=False,
@@ -133,8 +135,7 @@ class DIEN():
             raise ValueError('Dataset is not defined.')
         if not feature_column:
             raise ValueError('Dense column or sparse column is not defined.')
-        self._feature = inputs[0]
-        self._label = inputs[1]
+        self._feature = inputs
 
         self._uid_emb_column = feature_column['uid_emb_column']
         self._item_cate_column = feature_column['item_cate_column']
@@ -158,24 +159,19 @@ class DIEN():
         self._dynamic_ev = dynamic_ev
         self._ev_opt = ev_opt
         self._multihash = multihash
-
+        self.bs = cur_batch_size
         self._learning_rate = learning_rate
         self._optimizer_type = optimizer_type
         self._input_layer_partitioner = input_layer_partitioner
         self._dense_layer_partitioner = dense_layer_partitioner
 
-        self._batch_size = tf.shape(self._label)[0]
-        # 
         self._embedding_dim = embedding_dim
         self._hidden_size = hidden_size
         self._attention_size = attention_size
         self._data_type = tf.bfloat16 if self.bf16 else tf.float32
 
         self._create_model()
-        with tf.name_scope('head'):
-            self._create_loss()
-            self._create_optimizer()
-            self._create_metrics()
+
 
     # used to add summary in tensorboard
     def _add_layer_summary(self, value, tag):
@@ -371,9 +367,13 @@ class DIEN():
     def _embedding_input_layer(self):
         for key in SEQ_COLUMNS:
             self._feature[key] = tf.strings.split(self._feature[key], '')
-           
+            # logging.basicConfig(filename='log.txt', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
+            # try:
             self._feature[key] = tf.sparse.slice(
-                self._feature[key], [0, 0], [self._batch_size, MAX_SEQ_LENGTH])
+                self._feature[key], [0, 0], [self.bs, MAX_SEQ_LENGTH])
+            # except:
+            #     logging.debug(traceback.format_exc())
 
         # get uid embeddings
         if self._adaptive_emb and not self.tf:
@@ -556,98 +556,7 @@ class DIEN():
         self.probability = tf.math.sigmoid(self._logits)
         self.output = tf.round(self.probability)
 
-    # compute loss
-    def _create_loss(self):
-        self._logits = tf.squeeze(self._logits)
-        self._crt_loss = tf.losses.sigmoid_cross_entropy(
-            self._label,
-            self._logits,
-            scope='loss',
-            reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
-        self.loss = self._crt_loss + self._aux_loss
-        tf.summary.scalar('sigmoid_cross_entropy', self._crt_loss)
-        tf.summary.scalar('aux_loss', self._aux_loss)
-        tf.summary.scalar('loss', self.loss)
 
-    # define optimizer and generate train_op
-    def _create_optimizer(self):
-        self.global_step = tf.train.get_or_create_global_step()
-        if self.tf or self._optimizer_type == 'adam':
-            optimizer = tf.train.AdamOptimizer(
-                learning_rate=self._learning_rate)
-        elif self._optimizer_type == 'adamasync':
-            optimizer = tf.train.AdamAsyncOptimizer(
-                learning_rate=self._learning_rate)
-        elif self._optimizer_type == 'adagraddecay':
-            optimizer = tf.train.AdagradDecayOptimizer(
-                learning_rate=self._learning_rate,
-                global_step=self.global_step)
-        else:
-            raise ValueError("Optimzier type error.")
-
-        gradients = optimizer.compute_gradients(self.loss)
-        clipped_gradients = [(tf.clip_by_norm(grad, 5), var)
-                             for grad, var in gradients if grad is not None]
-
-        self.train_op = optimizer.apply_gradients(clipped_gradients,
-                                                  global_step=self.global_step)
-
-    # compute acc & auc
-    def _create_metrics(self):
-        self.acc, self.acc_op = tf.metrics.accuracy(labels=self._label,
-                                                    predictions=self.output)
-        self.auc, self.auc_op = tf.metrics.auc(labels=self._label,
-                                               predictions=self.probability,
-                                               num_thresholds=1000)
-        tf.summary.scalar('eval_acc', self.acc)
-        tf.summary.scalar('eval_auc', self.auc)
-
-
-# generate dataset pipline
-def build_model_input(filename, batch_size, num_epochs):
-    def parse_csv(value, neg_value):
-        tf.logging.info('Parsing {}'.format(filename))
-        cate_defaults = [[' '] for i in range(0, 5)]
-        label_defaults = [[0]]
-        column_headers = TRAIN_DATA_COLUMNS
-        record_defaults = label_defaults + cate_defaults
-        columns = tf.io.decode_csv(value,
-                                   record_defaults=record_defaults,
-                                   field_delim='\t')
-        neg_columns = tf.io.decode_csv(neg_value,
-                                       record_defaults=[[''], ['']],
-                                       field_delim='\t')
-        columns.extend(neg_columns)
-        all_columns = collections.OrderedDict(zip(column_headers, columns))
-
-        labels = all_columns.pop(LABEL_COLUMN[0])
-        features = all_columns
-        return features, labels
-
-    '''Work Queue Feature'''
-    if args.workqueue and not args.tf:
-        from tensorflow.python.ops.work_queue import WorkQueue
-        work_queue = WorkQueue([filename])
-        neg_work_queue = WorkQueue([filename + '_neg'])
-        # For multiple files：
-        # work_queue = WorkQueue([filename, filename1,filename2,filename3])
-        files = work_queue.input_dataset()
-        neg_files = neg_work_queue.input_dataset()
-    else:
-        files = filename
-        neg_files = filename + '_neg'
-    # Extract lines from input files using the Dataset API.
-    dataset = tf.data.TextLineDataset(files)
-    dataset_neg_samples = tf.data.TextLineDataset(neg_files)
-    dataset = tf.data.Dataset.zip((dataset, dataset_neg_samples))
-    dataset = dataset.shuffle(buffer_size=20000,
-                              seed=args.seed)  # set seed for reproducing
-    dataset = dataset.repeat(num_epochs)
-    dataset = dataset.batch(batch_size)
-    dataset = dataset.map(parse_csv,
-                          num_parallel_calls=tf.data.experimental.AUTOTUNE)
-    dataset = dataset.prefetch(2)
-    return dataset
 
 
 # generate feature columns
@@ -745,142 +654,17 @@ def build_feature_columns(data_location=None):
     }, ev_opt
 
 
-def train(sess_config,
-          input_hooks,
-          model,
-          data_init_op,
-          steps,
-          checkpoint_dir,
-          tf_config=None,
-          server=None):
-    model.is_training = True
-    hooks = []
-    hooks.extend(input_hooks)
-
-    scaffold = tf.train.Scaffold(
-        local_init_op=tf.group(tf.tables_initializer(),
-                               tf.local_variables_initializer(), data_init_op),
-        saver=tf.train.Saver(max_to_keep=args.keep_checkpoint_max))
-
-    stop_hook = tf.train.StopAtStepHook(last_step=steps)
-    log_hook = tf.train.LoggingTensorHook(
-        {
-            'steps': model.global_step,
-            'loss': model.loss
-        }, every_n_iter=100)
-    hooks.append(stop_hook)
-    hooks.append(log_hook)
-    if args.timeline > 0:
-        hooks.append(
-            tf.train.ProfilerHook(save_steps=args.timeline,
-                                  output_dir=checkpoint_dir))
-    save_steps = args.save_steps if args.save_steps or args.no_eval else steps
-    '''
-                            Incremental_Checkpoint
-    Please add `save_incremental_checkpoint_secs` in 'tf.train.MonitoredTrainingSession'
-    it's default to None, Incremental_save checkpoint time in seconds can be set 
-    to use incremental checkpoint function, like `tf.train.MonitoredTrainingSession(
-        save_incremental_checkpoint_secs=args.incremental_ckpt)`
-    '''
-    if args.incremental_ckpt and not args.tf:
-        print("Incremental_Checkpoint is not really enabled.")
-        print("Please see the comments in the code.")
-        sys.exit()
-
-    with tf.train.MonitoredTrainingSession(
-            master=server.target if server else '',
-            is_chief=tf_config['is_chief'] if tf_config else True,
-            hooks=hooks,
-            scaffold=scaffold,
-            checkpoint_dir=checkpoint_dir,
-            save_checkpoint_steps=save_steps,
-            summary_dir=checkpoint_dir,
-            save_summaries_steps=args.save_steps,
-            config=sess_config) as sess:
-        while not sess.should_stop():
-            sess.run([model.loss, model.train_op])
-    print("Training completed.")
-
-
-def eval(sess_config, input_hooks, model, data_init_op, steps, checkpoint_dir):
-    model.is_training = False
-    hooks = []
-    hooks.extend(input_hooks)
-
-    scaffold = tf.train.Scaffold(
-        local_init_op=tf.group(tf.tables_initializer(),
-                               tf.local_variables_initializer(), data_init_op))
-    session_creator = tf.train.ChiefSessionCreator(
-        scaffold=scaffold, checkpoint_dir=checkpoint_dir, config=sess_config)
-    writer = tf.summary.FileWriter(os.path.join(checkpoint_dir, 'eval'))
-    merged = tf.summary.merge_all()
-
-    with tf.train.MonitoredSession(session_creator=session_creator,
-                                   hooks=hooks) as sess:
-        for _in in range(1, steps + 1):
-            if (_in != steps):
-                sess.run([model.acc_op, model.auc_op])
-                if (_in % 100 == 0):
-                    print("Evaluation complate:[{}/{}]".format(_in, steps))
-            else:
-                eval_acc, eval_auc, events = sess.run(
-                    [model.acc_op, model.auc_op, merged])
-                writer.add_summary(events, _in)
-                print("Evaluation complate:[{}/{}]".format(_in, steps))
-                print("ACC = {}\nAUC = {}".format(eval_acc, eval_auc))
-
 
 def main(tf_config=None, server=None):
-    # check dataset and count data set size
-    print("Checking dataset...")
-    train_file = args.data_location + '/local_train_splitByUser'
-    test_file = args.data_location + '/local_test_splitByUser'
-    if (not os.path.exists(train_file)) or (not os.path.exists(test_file)) or (
-            not os.path.exists(train_file + '_neg')) or (
-                not os.path.exists(test_file + '_neg')):
-        print("Dataset does not exist in the given data_location.")
-        sys.exit()
-    no_of_training_examples = sum(1 for line in open(train_file))
-    no_of_test_examples = sum(1 for line in open(test_file))
-    print("Numbers of training dataset is {}".format(no_of_training_examples))
-    print("Numbers of test dataset is {}".format(no_of_test_examples))
 
     # set batch size, eporch & steps
     batch_size = math.ceil(
         args.batch_size / args.micro_batch
     ) if args.micro_batch and not args.tf else args.batch_size
 
-    if args.steps == 0:
-        no_of_epochs = 1
-        train_steps = math.ceil(
-            (float(no_of_epochs) * no_of_training_examples) / batch_size)
-    else:
-        no_of_epochs = math.ceil(
-            (float(batch_size) * args.steps) / no_of_training_examples)
-        train_steps = args.steps
-    test_steps = math.ceil(float(no_of_test_examples) / batch_size)
-    print("The training steps is {}".format(train_steps))
-    print("The testing steps is {}".format(test_steps))
-
     # set fixed random seed
     tf.set_random_seed(args.seed)
 
-    # set directory path for checkpoint_dir
-    model_dir = os.path.join(args.output_dir,
-                             'model_DIEN_' + str(int(time.time())))
-    checkpoint_dir = args.checkpoint if args.checkpoint else model_dir
-    print("Saving model checkpoints to " + checkpoint_dir)
-
-    # create data pipline of train & test dataset
-    train_dataset = build_model_input(train_file, batch_size, no_of_epochs)
-    test_dataset = build_model_input(test_file, batch_size, 1)
-
-    iterator = tf.data.Iterator.from_structure(train_dataset.output_types,
-                                               test_dataset.output_shapes)
-    next_element = iterator.get_next()
-
-    train_init_op = iterator.make_initializer(train_dataset)
-    test_init_op = iterator.make_initializer(test_dataset)
 
     # create feature column
     feature_column, ev_opt = build_feature_columns(args.data_location)
@@ -901,20 +685,13 @@ def main(tf_config=None, server=None):
     sess_config.inter_op_parallelism_threads = args.inter
     sess_config.intra_op_parallelism_threads = args.intra
 
-    # Session hooks
-    hooks = []
-
-    if args.smartstaged and not args.tf:
-        '''Smart staged Feature'''
-        next_element = tf.staged(next_element, num_threads=4, capacity=40)
-        sess_config.graph_options.optimizer_options.do_smart_stage = True
-        hooks.append(tf.make_prefetch_hook())
-    if args.op_fusion and not args.tf:
-        '''Auto Graph Fusion'''
-        sess_config.graph_options.optimizer_options.do_op_fusion = True
-    if args.micro_batch and not args.tf:
-        '''Auto Mirco Batch'''
-        sess_config.graph_options.optimizer_options.micro_batch_num = args.micro_batch
+    # UNSEQ_COLUMNS = ['UID', 'ITEM', 'CATEGORY']
+    # HIS_COLUMNS = ['HISTORY_ITEM', 'HISTORY_CATEGORY']
+    # NEG_COLUMNS = ['NOCLK_HISTORY_ITEM', 'NOCLK_HISTORY_CATEGORY']
+    final_input = {}
+    all_fea = UNSEQ_COLUMNS + SEQ_COLUMNS
+    for col in all_fea:
+        final_input[col] =  tf.placeholder(tf.string,[None], name=col)
 
     # create model
     model = DIEN(feature_column=feature_column,
@@ -932,17 +709,38 @@ def main(tf_config=None, server=None):
                  adaptive_emb=args.adaptive_emb,
                  dynamic_ev=args.dynamic_ev,
                  ev_opt=ev_opt,
-                 inputs=next_element,
+                 cur_batch_size = batch_size,
+                 inputs=final_input,
                  multihash=args.multihash,
                  input_layer_partitioner=input_layer_partitioner,
                  dense_layer_partitioner=dense_layer_partitioner)
+   
 
-    # Run model training and evaluation
-    train(sess_config, hooks, model, train_init_op, train_steps,
-          checkpoint_dir, tf_config, server)
-    if not (args.no_eval or tf_config):
-        eval(sess_config, hooks, model, test_init_op, test_steps,
-             checkpoint_dir)
+    with tf.Session() as sess1:
+        
+        # Initialize saver
+        folder_dir = args.checkpoint
+        saver = tf.train.Saver()
+
+        # Restore from checkpoint
+        saver.restore(sess1,tf.train.latest_checkpoint(folder_dir))
+        
+        # Get save directory
+        dir = "./savedmodels"
+        os.makedirs(dir,exist_ok=True)
+        cc_time = int(time.time())
+        saved_path = os.path.join(dir,str(cc_time))
+        os.mkdir(saved_path)
+        
+        
+        tf.saved_model.simple_save(
+            sess1,
+            saved_path,
+            inputs = model._feature,
+            outputs = {"predict":model.output}
+        )
+
+  
 
 
 def boolean_string(string):
