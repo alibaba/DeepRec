@@ -571,7 +571,16 @@ message ConfigProto {
 
   ExecutorPolicy executor_policy = 205;
 
-  // Next: 206
+  // Each session will use a independent gpu stream,
+  // now this param only use in SessionGroup.
+  bool use_per_session_stream = 206;
+  // Each session use a independent gpu stream,
+  // and every virtual gpu device has a owned gpu stream,
+  // so we will assign only one virtual gpu device
+  // to a session.
+  repeated string per_session_devices = 207;
+
+  // Next: 208
 }
 
 // Options for a single Run() call.

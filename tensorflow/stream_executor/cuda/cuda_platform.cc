@@ -66,7 +66,9 @@ const DeviceOptions GetDeviceOptionsFromEnv() {
 }  // namespace
 
 CudaPlatform::CudaPlatform()
-    : name_("CUDA"), min_numa_node_(0), limit_numa_node_(0) {}
+    : name_("CUDA"), min_numa_node_(0),
+      limit_numa_node_(0),
+      virtual_device_count_(-1) {}
 
 CudaPlatform::~CudaPlatform() {}
 
@@ -128,6 +130,19 @@ port::StatusOr<StreamExecutor*> CudaPlatform::FirstExecutorForBus(
 
 Platform::Id CudaPlatform::id() const { return cuda::kCudaPlatformId; }
 
+int CudaPlatform::VirtualDeviceCount() const {
+  if (virtual_device_count_ < 0) {
+    return VisibleDeviceCount();
+  } else {
+    return virtual_device_count_;
+  }
+}
+
+port::Status CudaPlatform::SetVirtualDeviceCount(int count) {
+  virtual_device_count_ = count;
+  return port::Status::OK();
+}
+
 int CudaPlatform::VisibleDeviceCount() const {
   // Throw away the result - it logs internally, and this [containing] function
   // isn't in the path of user control. It's safe to call this > 1x.
@@ -153,10 +168,31 @@ port::StatusOr<StreamExecutor*> CudaPlatform::ExecutorForDevice(int ordinal) {
   return GetExecutor(config);
 }
 
+port::StatusOr<StreamExecutor*> CudaPlatform::ExecutorForDevice(
+    int ordinal, int virtual_ordinal) {
+  StreamExecutorConfig config;
+  config.ordinal = ordinal;
+  config.virtual_ordinal = virtual_ordinal;
+  config.plugin_config = PluginConfig();
+  config.device_options = GetDeviceOptionsFromEnv();
+  return GetExecutor(config);
+}
+
 port::StatusOr<StreamExecutor*> CudaPlatform::ExecutorForDeviceWithPluginConfig(
     int device_ordinal, const PluginConfig& plugin_config) {
   StreamExecutorConfig config;
   config.ordinal = device_ordinal;
+  config.plugin_config = plugin_config;
+  config.device_options = GetDeviceOptionsFromEnv();
+  return GetExecutor(config);
+}
+
+port::StatusOr<StreamExecutor*> CudaPlatform::ExecutorForDeviceWithPluginConfig(
+    int device_ordinal, int virtual_ordinal,
+    const PluginConfig& plugin_config) {
+  StreamExecutorConfig config;
+  config.ordinal = device_ordinal;
+  config.virtual_ordinal = virtual_ordinal;
   config.plugin_config = plugin_config;
   config.device_options = GetDeviceOptionsFromEnv();
   return GetExecutor(config);

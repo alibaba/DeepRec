@@ -43,6 +43,8 @@ class ExecutorCache {
   // Returns a pointer to the described executor (if one with a matching config
   // has been created), or a NOT_FOUND status.
   port::StatusOr<StreamExecutor*> Get(const StreamExecutorConfig& config);
+  port::StatusOr<StreamExecutor*> Get(const StreamExecutorConfig& config,
+                                      const std::string& key);
 
   // Destroys all Executors and clears the cache.
   // Performs no synchronization with the executors - undefined behavior may
@@ -70,7 +72,7 @@ class ExecutorCache {
   // We key off of ordinal (instead of just looking up all fields in the
   // StreamExecutorConfig) for a slight improvement in lookup time.
   absl::Mutex mutex_;
-  std::map<int, Entry> cache_ GUARDED_BY(mutex_);
+  std::map<std::string, Entry> cache_ GUARDED_BY(mutex_);
 
   SE_DISALLOW_COPY_AND_ASSIGN(ExecutorCache);
 };

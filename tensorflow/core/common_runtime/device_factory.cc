@@ -144,7 +144,14 @@ Status DeviceFactory::AddDevices(
   for (auto& p : device_factories()) {
     auto factory = p.second.factory.get();
     if (factory != cpu_factory) {
-      TF_RETURN_IF_ERROR(factory->CreateDevices(options, name_prefix, devices));
+      // Now only support "CPU" and "GPU" device
+      if (p.first == "GPU") {
+        TF_RETURN_IF_ERROR(factory->CreateDevices(
+            options, name_prefix, devices, dev_rmgr_map));
+      } else {
+        TF_RETURN_IF_ERROR(factory->CreateDevices(
+            options, name_prefix, devices));
+      }
     }
   }
 

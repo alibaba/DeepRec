@@ -244,6 +244,7 @@ class DeviceBase {
   // Unimplemented by default
   virtual const DeviceAttributes& attributes() const;
   virtual const string& name() const;
+  virtual const string& physical_name() const;
 
   // Materializes the given TensorProto into 'tensor' stored in Device
   // memory.  Most devices will want to override this.

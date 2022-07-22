@@ -49,4 +49,13 @@ message DeviceAttributes {
 
   // String representation of the physical device that this device maps to.
   string physical_device_desc = 7;
+
+  // User may create several virtual deivce on a gpu.
+  // example:
+  // /GPU:0 -> /GPU:0
+  //        -> /GPU:1
+  //        -> /GPU:2
+  // the virtual device name is '/GPU:0', '/GPU:1', '/GPU:2',
+  // and the physical_name is '/GPU:0'
+  string physical_name = 8;
 }

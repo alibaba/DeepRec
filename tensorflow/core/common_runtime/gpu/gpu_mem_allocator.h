@@ -34,10 +34,21 @@ class GPUMemAllocator : public SubAllocator {
                            const std::vector<Visitor>& free_visitors)
       : SubAllocator(alloc_visitors, free_visitors),
         stream_exec_(stream_exec),
-        gpu_id_(gpu_id),
+        gpu_id_(gpu_id.value()),
         use_unified_memory_(use_unified_memory) {
     CHECK(stream_exec_ != nullptr);
   }
+  explicit GPUMemAllocator(se::StreamExecutor* stream_exec,
+                           TfGpuId gpu_id, bool use_unified_memory,
+                           const std::vector<Visitor>& alloc_visitors,
+                           const std::vector<Visitor>& free_visitors)
+      : SubAllocator(alloc_visitors, free_visitors),
+        stream_exec_(stream_exec),
+        gpu_id_(gpu_id.value()),
+        use_unified_memory_(use_unified_memory) {
+    CHECK(stream_exec_ != nullptr);
+  }
+
   ~GPUMemAllocator() override {}
 
   void* Alloc(size_t alignment, size_t num_bytes) override {
@@ -48,14 +59,14 @@ class GPUMemAllocator : public SubAllocator {
       } else {
         ptr = stream_exec_->AllocateArray<char>(num_bytes).opaque();
       }
-      VisitAlloc(ptr, gpu_id_.value(), num_bytes);
+      VisitAlloc(ptr, gpu_id_, num_bytes);
     }
     return ptr;
   }
 
   void Free(void* ptr, size_t num_bytes) override {
     if (ptr != nullptr) {
-      VisitFree(ptr, gpu_id_.value(), num_bytes);
+      VisitFree(ptr, gpu_id_, num_bytes);
       if (use_unified_memory_) {
         stream_exec_->UnifiedMemoryDeallocate(ptr);
       } else {
@@ -67,7 +78,7 @@ class GPUMemAllocator : public SubAllocator {
 
  private:
   se::StreamExecutor* stream_exec_;  // not owned, non-null
-  const PlatformGpuId gpu_id_;
+  const int gpu_id_;
   const bool use_unified_memory_ = false;
 
   TF_DISALLOW_COPY_AND_ASSIGN(GPUMemAllocator);

@@ -65,6 +65,13 @@ class Device : public DeviceBase {
   // Full name of this device (see top comment).
   const string& name() const override { return device_attributes_.name(); }
 
+  const string& physical_name() const override {
+    if (device_attributes_.physical_name().empty()) {
+      return device_attributes_.name();
+    }
+    return device_attributes_.physical_name();
+  }
+
   // Parsed name of this device
   const DeviceNameUtils::ParsedName& parsed_name() const {
     return parsed_name_;
@@ -184,6 +191,12 @@ class Device : public DeviceBase {
     return BuildDeviceAttributes(name, device, memory_limit, locality, "");
   }
 
+  static DeviceAttributes BuildDeviceAttributes(
+      const string& name, const string& physical_name,
+      DeviceType device, Bytes memory_limit,
+      const DeviceLocality& locality,
+      const string& physical_device_desc);
+ 
   // Clears the resource manager associated with this device.
   void ClearResourceMgr() { rmgr_->Clear(); }
 

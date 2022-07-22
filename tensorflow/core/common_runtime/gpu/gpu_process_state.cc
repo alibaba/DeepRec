@@ -121,14 +121,27 @@ Allocator* GPUProcessState::GetGPUAllocator(const GPUOptions& options,
     while (bus_id >= gpu_visitors_.size()) {
       gpu_visitors_.push_back({});
     }
-    se::StreamExecutor* stream_exec =
-        GpuIdUtil::ExecutorForPlatformGpuId(platform_gpu_id).ValueOrDie();
-    GPUMemAllocator* sub_allocator = new GPUMemAllocator(
-        stream_exec,
-        platform_gpu_id,
-        (options.per_process_gpu_memory_fraction() > 1.0 ||
-         options.experimental().use_unified_memory()),
-        gpu_visitors_[bus_id], {});
+
+    bool use_mps = GpuIdUtil::EnableMPS();
+    se::StreamExecutor* stream_exec = nullptr;
+    GPUMemAllocator* sub_allocator = nullptr;
+    if (use_mps) {
+      stream_exec = GpuIdUtil::ExecutorForTfGpuId(platform_gpu_id, tf_gpu_id).ValueOrDie();
+      sub_allocator = new GPUMemAllocator(
+          stream_exec,
+          tf_gpu_id,
+          (options.per_process_gpu_memory_fraction() > 1.0 ||
+          options.experimental().use_unified_memory()),
+          gpu_visitors_[bus_id], {});
+    } else {
+      stream_exec = GpuIdUtil::ExecutorForPlatformGpuId(platform_gpu_id).ValueOrDie();
+      sub_allocator = new GPUMemAllocator(
+          stream_exec,
+          platform_gpu_id,
+          (options.per_process_gpu_memory_fraction() > 1.0 ||
+          options.experimental().use_unified_memory()),
+          gpu_visitors_[bus_id], {});
+    }
     Allocator* gpu_allocator = nullptr;
     GPUBFCAllocator* gpu_bfc_allocator = nullptr;
     if (useTensorPoolAllocator()) {

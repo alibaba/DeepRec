@@ -315,6 +315,27 @@ class BaseGPUDevice::StreamGroupFactory {
 };
 
 BaseGPUDevice::BaseGPUDevice(const SessionOptions& options, const string& name,
+                             const string& physical_name, Bytes memory_limit,
+                             const DeviceLocality& locality, TfGpuId tf_gpu_id,
+                             const string& physical_device_desc,
+                             Allocator* gpu_allocator, Allocator* cpu_allocator,
+                             bool sync_every_op, int32 max_streams,
+                             const DeviceResourceMgrMap* dev_rmgr_map)
+    : LocalDevice(options, Device::BuildDeviceAttributes(name, physical_name,
+                                                         DEVICE_GPU,
+                                                         memory_limit, locality,
+                                                         physical_device_desc),
+                  dev_rmgr_map),
+      gpu_allocator_(gpu_allocator),
+      cpu_allocator_(cpu_allocator),
+      scoped_allocator_mgr_(new ScopedAllocatorMgr(name)),
+      tf_gpu_id_(tf_gpu_id),
+      sync_every_op_(sync_every_op),
+      max_streams_(max_streams) {
+  GPUProcessState::singleton()->EnableGPUDevice();
+}
+
+BaseGPUDevice::BaseGPUDevice(const SessionOptions& options, const string& name,
                              Bytes memory_limit, const DeviceLocality& locality,
                              TfGpuId tf_gpu_id,
                              const string& physical_device_desc,
@@ -1016,6 +1037,13 @@ Status BaseGPUDeviceFactory::ListPhysicalDevices(std::vector<string>* devices) {
 Status BaseGPUDeviceFactory::CreateDevices(
     const SessionOptions& options, const string& name_prefix,
     std::vector<std::unique_ptr<Device>>* devices) {
+  return CreateDevices(options, name_prefix, devices, nullptr);
+}
+
+Status BaseGPUDeviceFactory::CreateDevices(
+    const SessionOptions& options, const string& name_prefix,
+    std::vector<std::unique_ptr<Device>>* devices,
+    const DeviceResourceMgrMap* dev_rmgr_map) {
   TF_RETURN_IF_ERROR(ValidateGPUMachineManager());
   se::Platform* gpu_manager = GPUMachineManager();
   if (gpu_manager == nullptr) {
@@ -1179,6 +1207,34 @@ Status BaseGPUDeviceFactory::CreateDevices(
       TF_RETURN_IF_ERROR(SingleVirtualDeviceMemoryLimit(
           gpu_options, platform_gpu_id, &single_virtual_device_memory_limit));
       memory_limit_bytes.push_back(single_virtual_device_memory_limit);
+    } else if (virtual_devices.Get(i).memory_limit_mb()[0] < 0) {
+      // user no need to set memory to virtual devices in multi-streams.
+      // here will compute gpu memory for every virtual device.
+      int64 total_memory = 0;
+      int64 available_memory = 0;
+      se::StreamExecutor* se =
+          GpuIdUtil::ExecutorForPlatformGpuId(platform_gpu_id).ValueOrDie();
+      if (!se->DeviceMemoryUsage(&available_memory, &total_memory)) {
+        return errors::Unknown("Failed to query available memory for GPU ",
+                               platform_gpu_id.value());
+      }
+      int cc_major = 0, cc_minor = 0;
+      if (!se->GetDeviceDescription().cuda_compute_capability(&cc_major,
+                                                              &cc_minor)) {
+        return errors::Internal("Failed to get compute capability for device.");
+      }
+      const int64 min_system_memory = MinSystemMemory(available_memory,
+                                                      cc_major);
+      int virtual_num = virtual_devices.Get(i).memory_limit_mb().size();
+      available_memory = (available_memory-min_system_memory)/virtual_num/1024/1024; // MB
+      std::vector<int64> tmp_memory_limit_mb;
+      for (int i = 0; i < virtual_num; ++i)  {
+        tmp_memory_limit_mb.push_back(available_memory);
+      }
+      std::transform(tmp_memory_limit_mb.begin(), tmp_memory_limit_mb.end(),
+                     std::back_inserter(memory_limit_bytes), [](float mb) {
+                       return static_cast<int64>(mb) * (1ll << 20);
+                     });
     } else {
       const auto& memory_limit_mb = virtual_devices.Get(i).memory_limit_mb();
       std::transform(memory_limit_mb.begin(), memory_limit_mb.end(),
@@ -1194,6 +1250,7 @@ Status BaseGPUDeviceFactory::CreateDevices(
     }
   }
   const int num_tf_gpus = next_tf_gpu_id;
+  gpu_manager->SetVirtualDeviceCount(num_tf_gpus);
 
   LocalityMap device_localities;
   TF_RETURN_IF_ERROR(
@@ -1209,8 +1266,8 @@ Status BaseGPUDeviceFactory::CreateDevices(
       return errors::Internal("Failed to find DeviceLocality for GPU device ",
                               tf_gpu_id.value());
     }
-    TF_RETURN_IF_ERROR(CreateGPUDevice(options, name_prefix, tf_gpu_id, bytes,
-                                       it->second, devices));
+    TF_RETURN_IF_ERROR(CreateGPUDevice(options, name_prefix, tf_gpu_id,
+                                       bytes, it->second, devices, dev_rmgr_map));
   }
   return Status::OK();
 }
@@ -1241,6 +1298,16 @@ Status BaseGPUDeviceFactory::CreateGPUDevice(
     const SessionOptions& options, const string& name_prefix, TfGpuId tf_gpu_id,
     int64 memory_limit, const DeviceLocality& dev_locality,
     std::vector<std::unique_ptr<Device>>* devices) {
+  return CreateGPUDevice(options, name_prefix, tf_gpu_id,
+                         memory_limit, dev_locality, devices, nullptr);
+}
+
+Status BaseGPUDeviceFactory::CreateGPUDevice(
+    const SessionOptions& options, const string& name_prefix,
+    TfGpuId tf_gpu_id, int64 memory_limit,
+    const DeviceLocality& dev_locality,
+    std::vector<std::unique_ptr<Device>>* devices,
+    const DeviceResourceMgrMap* dev_rmgr_map) {
   CHECK_GE(tf_gpu_id.value(), 0);
   const string device_name =
       strings::StrCat(name_prefix, "/device:GPU:", tf_gpu_id.value());
@@ -1277,10 +1344,25 @@ Status BaseGPUDeviceFactory::CreateGPUDevice(
   // TODO(laigd): report error if memory_limit doesn't match
   // stats->bytes_limit.
   int64 bytes_limit = stats->bytes_limit ? *stats->bytes_limit : 0;
-  std::unique_ptr<BaseGPUDevice> gpu_device = CreateGPUDevice(
-      options, device_name, static_cast<Bytes>(bytes_limit), dev_locality,
-      tf_gpu_id, GetShortDeviceDescription(platform_gpu_id, *desc),
-      gpu_allocator, ProcessState::singleton()->GetCPUAllocator(numa_node));
+
+  std::unique_ptr<BaseGPUDevice> gpu_device;
+  if (dev_rmgr_map) {
+    const string physical_name =
+        strings::StrCat(name_prefix, "/device:GPU:", platform_gpu_id.value());
+    std::unique_ptr<BaseGPUDevice> tmp = CreateGPUDevice(
+        options, device_name, physical_name, static_cast<Bytes>(bytes_limit),
+        dev_locality, tf_gpu_id, GetShortDeviceDescription(platform_gpu_id, *desc),
+        gpu_allocator, ProcessState::singleton()->GetCPUAllocator(numa_node),
+        dev_rmgr_map);
+    gpu_device = std::move(tmp);
+  } else {
+    std::unique_ptr<BaseGPUDevice> tmp = CreateGPUDevice(
+        options, device_name, static_cast<Bytes>(bytes_limit), dev_locality,
+        tf_gpu_id, GetShortDeviceDescription(platform_gpu_id, *desc),
+        gpu_allocator, ProcessState::singleton()->GetCPUAllocator(numa_node));
+    gpu_device = std::move(tmp);
+  }
+
   LOG(INFO) << "Created TensorFlow device (" << device_name << " with "
             << (bytes_limit >> 20) << " MB memory) -> physical GPU ("
             << GetShortDeviceDescription(platform_gpu_id, *desc) << ")";

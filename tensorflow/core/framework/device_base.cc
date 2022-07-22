@@ -37,6 +37,10 @@ const string& DeviceBase::name() const {
   LOG(FATAL) << "Device does not implement name()";
 }
 
+const string& DeviceBase::physical_name() const {
+  LOG(FATAL) << "Device does not implement physical_name()";
+}
+
 void DeviceBase::set_eigen_cpu_device(Eigen::ThreadPoolDevice* d) {
   // Eigen::ThreadPoolDevice is a very cheap struct (two pointers and
   // an int).  Therefore, we can afford a pre-allocated array of

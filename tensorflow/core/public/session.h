@@ -271,11 +271,18 @@ class Session {
 
 class SessionGroup {
  public:
-  SessionGroup() : shared_resource_mgr_(nullptr) {}
-  SessionGroup(ResourceMgr* mgr) : shared_resource_mgr_(mgr) {}
+  SessionGroup()
+      : cpu_shared_resource_mgr_(nullptr),
+        gpu_shared_resource_mgr_(nullptr) {}
+  SessionGroup(ResourceMgr* cpu_mgr, ResourceMgr* gpu_mgr)
+      : cpu_shared_resource_mgr_(cpu_mgr),
+        gpu_shared_resource_mgr_(gpu_mgr) {}
   ~SessionGroup() {
-    if (shared_resource_mgr_) {
-      delete shared_resource_mgr_;
+    if (cpu_shared_resource_mgr_) {
+      delete cpu_shared_resource_mgr_;
+    }
+    if (gpu_shared_resource_mgr_) {
+      delete gpu_shared_resource_mgr_;
     }
   }
 
@@ -381,7 +388,8 @@ class SessionGroup {
   std::vector<std::unique_ptr<Session>> sessions_;
   int32_t session_num_ = 0;
   std::atomic<int64_t> serving_index_{0};
-  ResourceMgr* shared_resource_mgr_ = nullptr;
+  ResourceMgr* cpu_shared_resource_mgr_ = nullptr;
+  ResourceMgr* gpu_shared_resource_mgr_ = nullptr;
 
   Status GetServingSessionId(int32_t* serving_id, int32_t hint_id = -1) {
     if (session_num_ < 1) {

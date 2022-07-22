@@ -723,8 +723,22 @@ Status GraphExecutionState::InitBaseGraph(std::unique_ptr<Graph>&& new_graph) {
   TF_RETURN_IF_ERROR(OptimizationPassRegistry::Global()->RunGrouping(
       OptimizationPassRegistry::PRE_PLACEMENT, optimization_options));
 
+  // Assigned per gpu device to a session when use multi-stream in SessionGroup mode.
+  // The device name is listed in config.per_session_devices.
+  Device* default_local_device = nullptr;
+  if (session_options_->config.per_session_devices_size() > 0) {
+    const auto& dname = session_options_->config.per_session_devices(0);
+    for (auto& d : device_set_->devices()) {
+      if (d->name() == dname) {
+        default_local_device = d;
+        LOG(INFO) << "Assign " << d->name() << " to a session in session group.";
+        break;
+      }
+    }
+  }
+
   Placer placer(new_graph.get(), "", flib_def_.get(), device_set_,
-                /* default_local_device= */ nullptr,
+                default_local_device,
                 session_options_ == nullptr ||
                     session_options_->config.allow_soft_placement(),
                 session_options_ != nullptr &&

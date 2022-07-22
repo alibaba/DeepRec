@@ -21,6 +21,7 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/gpu/gpu_init.h"
 #include "tensorflow/core/lib/gtl/int_type.h"
 #include "tensorflow/core/platform/stream_executor.h"
+#include "tensorflow/core/util/env_var.h"
 
 namespace tensorflow {
 
@@ -28,6 +29,23 @@ namespace tensorflow {
 // ids.
 class GpuIdUtil {
  public:
+  static bool EnableMPS() {
+    static std::atomic<bool> init{false};
+    static std::atomic<bool> enable_mps{false};
+    static mutex mu;
+    if (!init) {
+      mutex_lock l(mu);
+      if (!init) {
+        bool tmp = false;
+        tensorflow::ReadBoolFromEnvVar("ENABLE_MPS", false, &tmp);
+        enable_mps = tmp;
+        init = true;
+      }
+    }
+
+    return enable_mps;
+  }
+
   // Convenient methods for getting the associated executor given a TfGpuId or
   // PlatformGpuId.
   static se::port::StatusOr<se::StreamExecutor*> ExecutorForPlatformGpuId(
@@ -38,11 +56,23 @@ class GpuIdUtil {
       PlatformGpuId platform_gpu_id) {
     return ExecutorForPlatformGpuId(GPUMachineManager(), platform_gpu_id);
   }
+  // Used for GPU MPS mode.
+  static se::port::StatusOr<se::StreamExecutor*> ExecutorForTfGpuId(
+      PlatformGpuId platform_gpu_id, TfGpuId tf_gpu_id) {
+    se::Platform* gpu_manager = GPUMachineManager();
+    const int virtual_gpus = gpu_manager->VirtualDeviceCount();
+    const int visible_gpus = gpu_manager->VisibleDeviceCount();
+    int tf_id = tf_gpu_id.value() % (virtual_gpus / visible_gpus);
+    return gpu_manager->ExecutorForDevice(platform_gpu_id.value(), tf_id);
+  }
   static se::port::StatusOr<se::StreamExecutor*> ExecutorForTfGpuId(
       TfGpuId tf_gpu_id) {
     PlatformGpuId platform_gpu_id;
     TF_RETURN_IF_ERROR(
         GpuIdManager::TfToPlatformGpuId(tf_gpu_id, &platform_gpu_id));
+    if (EnableMPS()) {
+      return ExecutorForTfGpuId(platform_gpu_id, tf_gpu_id);
+    }
     return ExecutorForPlatformGpuId(platform_gpu_id);
   }
 

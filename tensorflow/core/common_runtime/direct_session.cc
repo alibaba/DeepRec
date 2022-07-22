@@ -257,6 +257,32 @@ class DirectSessionFactory : public SessionFactory {
       EnableCPUAllocatorFullStats(true);
     }
 
+#if GOOGLE_CUDA
+    // Each virtual gpu device will be assigned to one session,
+    // and every virtual device has a independent stream.
+    bool use_multi_stream = options.config.use_per_session_stream();
+    if (use_multi_stream) {
+      int multi_streams_num = session_num;
+      ConfigProto* config = const_cast<ConfigProto*>(&options.config);
+      GPUOptions* gpu_options = config->mutable_gpu_options();
+      auto virtual_devices =
+          gpu_options->mutable_experimental()->add_virtual_devices();
+      // will allocate gpu memory for each virtual device later.
+      int32 mem_per_virtual_device = -1;
+      for (int i = 0; i < multi_streams_num; ++i) {
+        virtual_devices->add_memory_limit_mb(-1);
+      }
+
+      // We set allow_growth in multi-stream mode.
+      gpu_options->set_allow_growth(true);
+    } else {
+      // NOTE: Use single stream in session group mode.
+      // This can't get good performance.
+      LOG(WARNING) << "Use single stream in session group mode,"
+                   << "this can't get good performance.";
+    }
+#endif // GOOGLE_CUDA
+
 #ifdef TENSORFLOW_USE_NUMA
     int numa_num = port::NUMANumNodes();
     std::vector<unsigned> visible_cpus;
@@ -279,36 +305,83 @@ class DirectSessionFactory : public SessionFactory {
     dev_rmgr_map.device_rmgr_map["/device:CPU:0"] = shared_rmgr;
     dev_rmgr_map.device_rmgr_map["/device:cpu:0"] = shared_rmgr;
 
+    ResourceMgr* gpu_shared_rmgr = nullptr;
+#if GOOGLE_CUDA
+    if (use_multi_stream) {
+      // Create shared resource for gpu devices
+      gpu_shared_rmgr = new ResourceMgr("localhost");
+      std::string gpu_dev_prefix("/job:localhost/replica:0/task:0/device:GPU:");
+      for (int i = 0; i < session_num; ++i) {
+        dev_rmgr_map.device_rmgr_map[gpu_dev_prefix+std::to_string(i)] =
+            gpu_shared_rmgr;
+      }
+    }
+#endif // GOOGLE_CUDA
+
     std::vector<std::unique_ptr<Device>> devices;
     TF_RETURN_IF_ERROR(DeviceFactory::AddDevices(
         options, "/job:localhost/replica:0/task:0",
         &devices, &dev_rmgr_map));
 
+#if GOOGLE_CUDA
+    if (use_multi_stream) {
+      RemoveUselessDevice(devices, 0);
+    }
+#endif // GOOGLE_CUDA
     DeviceMgr* device_mgr = new DeviceMgr(std::move(devices));
 
-    SessionGroup* session_group = new SessionGroup(shared_rmgr);
+    SessionGroup* session_group = new SessionGroup(shared_rmgr, gpu_shared_rmgr);
+    SessionOptions leader_options = options;
+#if GOOGLE_CUDA
+    if (use_multi_stream) {
+      leader_options.config.add_per_session_devices(
+          "/job:localhost/replica:0/task:0/device:GPU:0");
+    }
+#endif // GOOGLE_CUDA
+
 #ifdef TENSORFLOW_USE_NUMA
     DirectSession* leader_session =
-        new DirectSession(options, device_mgr, true, this,
+        new DirectSession(leader_options, device_mgr, true, this,
                           visible_cpus_per_session[0]);
 #else
     DirectSession* leader_session =
-        new DirectSession(options, device_mgr, true, this);
+        new DirectSession(leader_options, device_mgr, true, this);
 #endif  // TENSORFLOW_USE_NUMA
     session_group->CreateLeaderSession(leader_session);
     for (int i = 1; i < session_num; ++i) {
       std::vector<std::unique_ptr<Device>> dev;
       TF_RETURN_IF_ERROR(DeviceFactory::AddDevices(
           options, "/job:localhost/replica:0/task:0", &dev, &dev_rmgr_map));
-      DeviceMgr* dev_mgr = new DeviceMgr(std::move(dev));
+      DeviceMgr* dev_mgr = nullptr;
+#if GOOGLE_CUDA
+      if (use_multi_stream) {
+        RemoveUselessDevice(dev, i);
+        dev_mgr = new DeviceMgr(std::move(dev));
+      } else {
+        // Use the same deivce as leader session, this can't get
+        // good performance, so user should set use_multi_stream true
+        // in session group mode.
+        dev_mgr = device_mgr;
+      }
+#else
+      dev_mgr = new DeviceMgr(std::move(dev));
+#endif // GOOGLE_CUDA
+
+      SessionOptions follower_options = options;
+#if GOOGLE_CUDA
+      if (use_multi_stream) {
+        follower_options.config.add_per_session_devices(
+            "/job:localhost/replica:0/task:0/device:GPU:"+std::to_string(i));
+      }
+#endif // GOOGLE_CUDA
 
 #ifdef TENSORFLOW_USE_NUMA
       DirectSession* follower_session =
-          new DirectSession(options, dev_mgr,true, this,
+          new DirectSession(follower_options, dev_mgr, true, this,
                             visible_cpus_per_session[i]);
 #else
       DirectSession* follower_session =
-          new DirectSession(options, dev_mgr, true, this);
+          new DirectSession(follower_options, dev_mgr, true, this);
 #endif  // TENSORFLOW_USE_NUMA
       session_group->CreateFollowerSession(follower_session);
       {
@@ -359,6 +432,22 @@ class DirectSessionFactory : public SessionFactory {
   }
 
  private:
+  void RemoveUselessDevice(std::vector<std::unique_ptr<Device>>& devices,
+                           int stream_idx) {
+    std::string base_dev_name("/job:localhost/replica:0/task:0/device:GPU:");
+    std::string stream_device(base_dev_name+std::to_string(stream_idx));
+    int idx = 0;
+    while (idx < devices.size()) {
+      // remove useless virtual gpu device
+      if (devices[idx]->name().find(base_dev_name) != std::string::npos &&
+          devices[idx]->name() != stream_device) {
+        devices.erase(devices.begin() + idx);
+      } else {
+        ++idx;
+      }
+    }
+  }
+
   static string GetMetadataKey(const SessionMetadata& metadata) {
     return absl::StrCat(metadata.name(), "/", metadata.version());
   }

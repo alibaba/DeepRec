@@ -61,8 +61,19 @@ void Device::Sync(const DoneCallback& done) { done(Sync()); }
 DeviceAttributes Device::BuildDeviceAttributes(
     const string& name, DeviceType device, Bytes memory_limit,
     const DeviceLocality& locality, const string& physical_device_desc) {
+  return BuildDeviceAttributes(name, "",  device, memory_limit, locality,
+                               physical_device_desc);
+}
+
+// static
+DeviceAttributes Device::BuildDeviceAttributes(
+    const string& name, const string& physical_name,
+    DeviceType device, Bytes memory_limit,
+    const DeviceLocality& locality,
+    const string& physical_device_desc) {
   DeviceAttributes da;
   da.set_name(name);
+  da.set_physical_name(physical_name);
   do {
     da.set_incarnation(random::New64());
   } while (da.incarnation() == 0);  // This proto field must not be zero

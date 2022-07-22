@@ -81,14 +81,30 @@ void CheckPlatformKindIsValid(PlatformKind kind) {
 }
 
 StreamExecutorConfig::StreamExecutorConfig()
-    : ordinal(-1), device_options(DeviceOptions::Default()) {}
+    : ordinal(-1), virtual_ordinal(-1),
+      device_options(DeviceOptions::Default()) {}
 
 StreamExecutorConfig::StreamExecutorConfig(int ordinal_in)
-    : ordinal(ordinal_in), device_options(DeviceOptions::Default()) {}
+    : ordinal(ordinal_in), virtual_ordinal(-1),
+      device_options(DeviceOptions::Default()) {}
+
+StreamExecutorConfig::StreamExecutorConfig(
+    int ordinal_in, int virtual_ordinal_in)
+    : ordinal(ordinal_in), virtual_ordinal(virtual_ordinal_in),
+      device_options(DeviceOptions::Default()) {}
 
 Platform::~Platform() {}
 
 bool Platform::Initialized() const { return true; }
+
+int Platform::VirtualDeviceCount() const {
+  return VisibleDeviceCount();
+}
+
+port::Status Platform::SetVirtualDeviceCount(int count) {
+  return port::Status(port::error::UNIMPLEMENTED,
+                      "this platform does not support virtual devices");
+}
 
 port::Status Platform::Initialize(
     const std::map<string, string> &platform_options) {

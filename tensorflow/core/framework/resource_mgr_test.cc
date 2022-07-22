@@ -239,6 +239,12 @@ class StubDevice : public DeviceBase {
 
   const DeviceAttributes& attributes() const override { return attr_; }
   const string& name() const override { return attr_.name(); }
+  const string& physical_name() const override {
+    if (attr_.physical_name().empty()) {
+      return attr_.name();
+    }
+    return attr_.physical_name();
+  }
 
  private:
   DeviceAttributes attr_;

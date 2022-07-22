@@ -37,7 +37,7 @@ ResourceHandle MakeResourceHandle(
     const TypeIndex& type_index,
     const std::vector<DtypeAndPartialTensorShape>& dtypes_and_shapes) {
   ResourceHandle result;
-  result.set_device(device.name());
+  result.set_device(device.physical_name());
   result.set_container(container);
   if (name == ResourceHandle::ANONYMOUS_NAME) {
     result.set_name(strings::StrCat("_AnonymousVar", current_id_.fetch_add(1)));
@@ -64,7 +64,7 @@ Status MakeResourceHandleToOutput(OpKernelContext* context, int output_index,
 namespace internal {
 
 Status ValidateDevice(OpKernelContext* ctx, const ResourceHandle& p) {
-  if (ctx->device()->attributes().name() != p.device()) {
+  if (ctx->device()->physical_name() != p.device()) {
     return errors::InvalidArgument(
         "Trying to access resource ", p.name(), " located in device ",
         p.device(), " from device ", ctx->device()->attributes().name());
