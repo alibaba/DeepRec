@@ -7,6 +7,11 @@
 #include "tensorflow/core/framework/embedding/leveldb_kv.h"
 #include "tensorflow/core/framework/embedding/ssd_hashkv.h"
 #include "tensorflow/core/framework/embedding/lockless_hash_map.h"
+#if GOOGLE_CUDA
+#if !TF_ENABLE_GPU_EV
+#include "tensorflow/core/framework/embedding/lockless_hash_map_cpu.h"
+#endif  // TF_ENABLE_GPU_EV
+#endif  // GOOGLE_CUDA
 #include "tensorflow/core/framework/embedding/kv_interface.h"
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/lib/core/status.h"
@@ -69,7 +74,7 @@ class StorageManager {
     delete cache_;
   }
 
-  Status Init() {
+  Status Init(Allocator* alloc_ = nullptr) {
     switch (sc_.layout_type) {
       case LayoutType::NORMAL:
         new_value_ptr_fn_ = [] (Allocator* alloc, size_t size) { return new NormalValuePtr<V>(alloc, size); };
@@ -84,12 +89,11 @@ class StorageManager {
         new_value_ptr_fn_ = [] (Allocator* alloc, size_t size) { return new NormalValuePtr<V>(alloc, size); };
         break;
     }
-    
     switch (sc_.type) {
       Allocator* alloc_ssd;
       case StorageType::DRAM:
         VLOG(1) << "StorageManager::DRAM: " << name_;
-        kvs_.push_back(std::make_pair(new LocklessHashMap<K, V>(), ev_allocator()));
+        kvs_.push_back(std::make_pair(new LocklessHashMap<K, V>(), cpu_allocator()));
         break;
       case StorageType::PMEM_MEMKIND:
         VLOG(1) << "StorageManager::PMEM_MEMKIND: " << name_;
@@ -126,9 +130,19 @@ class StorageManager {
         kvs_.emplace_back(std::make_pair(new LocklessHashMap<K, V>(), alloc_ssd));
         kvs_.emplace_back(std::make_pair(new SSDHashKV<K, V>(sc_.path, alloc_ssd), alloc_ssd));
         break;
+      case StorageType::HBM_DRAM:
+#if GOOGLE_CUDA
+#if !TF_ENABLE_GPU_EV
+        new_value_ptr_fn_ = [] (Allocator* allocator, size_t size) { return new NormalGPUValuePtr<V>(allocator, size); };
+        LOG(INFO) << "StorageManager::HBM_DRAM: " << name_;
+        kvs_.push_back(std::make_pair(new LocklessHashMap<K, V>(), alloc_));
+        kvs_.push_back(std::make_pair(new LocklessHashMapCPU<K, V>(), cpu_allocator()));
+#endif  // TF_ENABLE_GPU_EV
+#endif  // GOOGLE_CUDA
+        break;
       default:
         VLOG(1) << "StorageManager::default" << name_;
-        kvs_.push_back(std::make_pair(new LocklessHashMap<K, V>(), ev_allocator()));
+        kvs_.push_back(std::make_pair(new LocklessHashMap<K, V>(), cpu_allocator()));
         break;
     }
 
@@ -163,6 +177,8 @@ class StorageManager {
       if (sc_.type == StorageType::LEVELDB || sc_.type == StorageType::SSDHASH) {
         kvs_[0].first->SetTotalDims(total_dims_);
       } else if (sc_.type == StorageType::DRAM_LEVELDB || sc_.type == StorageType::DRAM_SSDHASH) {
+        kvs_[1].first->SetTotalDims(total_dims_);
+      } else if (sc_.type == StorageType::HBM_DRAM) {
         kvs_[1].first->SetTotalDims(total_dims_);
       }
       if (hash_table_count_ > 1) {
@@ -236,6 +252,18 @@ class StorageManager {
     if (!found) {
       *value_ptr = new_value_ptr_fn_(kvs_[0].second, size);
     }
+
+    if (sc_.type == StorageType::HBM_DRAM && level && found) {
+#if GOOGLE_CUDA
+#if !TF_ENABLE_GPU_EV
+      ValuePtr<V>* gpu_value_ptr = new_value_ptr_fn_(kvs_[0].second, size);
+      V* cpu_data_address = (*value_ptr)->GetValue(0, 0);
+      V* gpu_data_address = gpu_value_ptr->GetValue(0, 0);
+      cudaMemcpy(gpu_data_address, cpu_data_address, size * sizeof(V), cudaMemcpyHostToDevice);
+      *value_ptr = gpu_value_ptr;
+#endif  // TF_ENABLE_GPU_EV
+#endif  // GOOGLE_CUDA
+    }
     if (level || !found) {
       Status s = kvs_[0].first->Insert(key, *value_ptr);
       if (s.ok()) {
@@ -251,6 +279,68 @@ class StorageManager {
     }
     return Status::OK();
   }
+
+Status GetOrCreate(K key, ValuePtr<V>** value_ptr, size_t size, bool &need_copyback) {
+    bool found = false;
+    int level = 0;
+    need_copyback = false;
+
+    for (; level < hash_table_count_; ++level) {
+      Status s = kvs_[level].first->Lookup(key, value_ptr);
+      if (s.ok()) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      *value_ptr = new_value_ptr_fn_(kvs_[0].second, size);
+    }
+
+    if (sc_.type == StorageType::HBM_DRAM && level && found) {
+      need_copyback = true;
+    }
+    if ( (level || !found ) && !need_copyback) {
+      Status s = kvs_[0].first->Insert(key, *value_ptr);
+      if (s.ok()) {
+        // Insert Success
+        return s;
+      } else {
+        // Insert Failed, key already exist
+        (*value_ptr)->Destroy(kvs_[0].second);
+        delete *value_ptr;
+        s = kvs_[0].first->Lookup(key, value_ptr);
+        return s;
+      }
+    }
+    return Status::OK();
+  }
+
+#if GOOGLE_CUDA
+#if !TF_ENABLE_GPU_EV
+  void CopyBackToGPU(int total, K* keys, int64 size, bool* copyback_flags, V** memcpy_address, size_t value_len, int *copyback_cursor, ValuePtr<V> **gpu_value_ptrs, V* memcpy_buffer_gpu){
+    V *memcpy_buffer_cpu;
+    memcpy_buffer_cpu = (V*)malloc(total * value_len * sizeof(V));
+    int j = 0;
+    for (int i = 0; i < size;i++) {
+      if (copyback_flags[i]) {
+        ValuePtr<V>* gpu_value_ptr = new_value_ptr_fn_(kvs_[0].second, size);
+        //Copy Header Info
+        memcpy((char *)gpu_value_ptr->GetPtr(), (char *)memcpy_address[i] - sizeof(FixedLengthHeader), sizeof(FixedLengthHeader));
+        V* cpu_data_address = memcpy_address[i];
+        V* gpu_data_address = gpu_value_ptr->GetValue(0, 0);
+        //cudaMemcpy(gpu_data_address, cpu_data_address, value_len * sizeof(V), cudaMemcpyHostToDevice);
+        memcpy(memcpy_buffer_cpu + j * value_len, cpu_data_address, value_len * sizeof(V));
+        copyback_cursor[j] = i;
+        gpu_value_ptrs[j] = gpu_value_ptr;
+        j++;
+        kvs_[0].first->Insert(keys[i], gpu_value_ptr);
+      }
+    }
+
+    cudaMemcpy(memcpy_buffer_gpu, memcpy_buffer_cpu, total * value_len * sizeof(V), cudaMemcpyHostToDevice);
+  }
+#endif  // TF_ENABLE_GPU_EV
+#endif  // GOOGLE_CUDA
 
   Status Remove(K key) {
     for (auto kv : kvs_) {
@@ -305,7 +395,7 @@ class StorageManager {
             version_list->push_back(dump_version);
         }
         if (val != nullptr && primary_val != nullptr) {
-          value_list->push_back(val);  
+          value_list->push_back(val);
         } else if (val == nullptr && primary_val != nullptr) {
           // only forward, no backward
           value_list->push_back(reinterpret_cast<V*>(-1));
@@ -314,7 +404,7 @@ class StorageManager {
           value_list->push_back(nullptr);
         }
         // storage_manager_->FreeValuePtr(value_ptr_list[i]);
-      } 
+      }
     }
     return key_list->size();
   }
@@ -417,6 +507,8 @@ class StorageManager {
 
   mutex* get_mutex() { return &mu_; }
 
+
+
  private:
   void BatchEviction() {
     Env* env = Env::Default();
@@ -441,7 +533,6 @@ class StorageManager {
         delete value_ptr_out_of_date_[i];
       }
       value_ptr_out_of_date_.clear();
-      
       int cache_count = cache_->size();
       if (cache_count > cache_capacity_) {
         // eviction
@@ -449,13 +540,38 @@ class StorageManager {
         k_size = std::min(k_size, EvictionSize);
         size_t true_size = cache_->get_evic_ids(evic_ids, k_size);
         ValuePtr<V>* value_ptr;
-        for (int64 i = 0; i < true_size; ++i) {
-          if (kvs_[0].first->Lookup(evic_ids[i], &value_ptr).ok()) {
-            TF_CHECK_OK(kvs_[1].first->Commit(evic_ids[i], value_ptr));
-            TF_CHECK_OK(kvs_[0].first->Remove(evic_ids[i]));
-            value_ptr_out_of_date_.emplace_back(value_ptr);
-          } else {
-            // bypass
+        if (sc_.type == StorageType::HBM_DRAM) {
+          std::vector<K> keys;
+          std::vector<ValuePtr<V>*> value_ptrs;
+          LOG(INFO) << "Cache_count: " << cache_count;
+          timespec start, end;
+
+          clock_gettime(CLOCK_MONOTONIC, &start);
+          for (int64 i = 0; i < true_size; ++i) {
+            if (kvs_[0].first->Lookup(evic_ids[i], &value_ptr).ok()) {
+              TF_CHECK_OK(kvs_[0].first->Remove(evic_ids[i]));
+              keys.push_back(evic_ids[i]);
+              value_ptrs.push_back(value_ptr);
+            }
+          }
+
+          BatchCommit(keys, value_ptrs);
+
+          for (int64 i = 0; i < true_size; ++i) {
+            // value_ptrs[i]->Destroy(kvs_[0].second);
+            // delete value_ptrs[i];
+          }
+          clock_gettime(CLOCK_MONOTONIC, &end);
+          LOG(INFO) << "Total Evict Time: " << ((double)(end.tv_sec - start.tv_sec) * 1000000000 + end.tv_nsec - start.tv_nsec) / 1000000 << "ms";
+        } else {
+          for (int64 i = 0; i < true_size; ++i) {
+            if (kvs_[0].first->Lookup(evic_ids[i], &value_ptr).ok()) {
+              TF_CHECK_OK(kvs_[1].first->Commit(evic_ids[i], value_ptr));
+              TF_CHECK_OK(kvs_[0].first->Remove(evic_ids[i]));
+              value_ptr_out_of_date_.emplace_back(value_ptr);
+            } else {
+              // bypass
+            }
           }
         }
       }

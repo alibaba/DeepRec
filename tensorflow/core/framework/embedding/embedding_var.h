@@ -41,12 +41,13 @@ class EmbeddingVar : public ResourceBase {
  public:
   EmbeddingVar(const string& name,
                embedding::StorageManager<K, V>* storage_manager,
-               EmbeddingConfig emb_cfg = EmbeddingConfig()):
+               EmbeddingConfig emb_cfg = EmbeddingConfig(),
+               Allocator* alloc = nullptr):
       name_(name),
       storage_manager_(storage_manager),
       default_value_(nullptr),
       value_len_(0),
-      alloc_(nullptr),
+      alloc_(alloc),
       emb_config_(emb_cfg) {
         if (IsMultiLevel() || emb_config_.record_freq) {
           add_freq_fn_ = [](ValuePtr<V>* value_ptr, int freq, int64 filter_freq) {
@@ -60,7 +61,7 @@ class EmbeddingVar : public ResourceBase {
         } else {
           add_freq_fn_ = [](ValuePtr<V>* value_ptr, int freq, int64 filter_freq) {};
         }
-        if (emb_config_.steps_to_live != 0 || emb_config_.record_version){
+        if (emb_config_.steps_to_live != 0 || emb_config_.record_version) {
           update_version_fn_ = [](ValuePtr<V>* value_ptr, int64 gs) {
             value_ptr->SetStep(gs);
           };
@@ -72,21 +73,37 @@ class EmbeddingVar : public ResourceBase {
   Status Init(const Tensor& default_tensor, int64 default_value_dim) {
     filter_ = FilterFactory::CreateFilter<K, V, EmbeddingVar<K, V>>(emb_config_, this, storage_manager_);
 
-    // for default value allocation
-    alloc_ = ev_allocator();
-
     if (storage_manager_ == nullptr) {
       return errors::InvalidArgument("Invalid ht_type to construct EmbeddingVar");
     } else {
-      emb_config_.default_value_dim = default_value_dim;
-      value_len_ = default_tensor.NumElements()/emb_config_.default_value_dim;
-      default_value_ = TypedAllocator::Allocate<V>(cpu_allocator(),
-          default_tensor.NumElements(), AllocationAttributes());
-      auto default_tensor_flat = default_tensor.flat<V>();
-      memcpy(default_value_, &default_tensor_flat(0), default_tensor.TotalBytes());
+      if (embedding::StorageType::HBM_DRAM == storage_manager_->GetStorageType()) {
+#if GOOGLE_CUDA
+#if !TF_ENABLE_GPU_EV
+        emb_config_.default_value_dim = default_value_dim;
+        value_len_ = default_tensor.NumElements() / emb_config_.default_value_dim;
+        default_value_ = TypedAllocator::Allocate<V>(alloc_, default_tensor.NumElements(), AllocationAttributes());
+        auto default_tensor_flat = default_tensor.flat<V>();
+        buffer1 = nullptr;
+        buffer2 = nullptr;
+        buffer3 = nullptr;
+        buffer1_size = 0;
+        buffer2_size = 0;
+        buffer3_size = 0;
+        cudaMemcpy(default_value_, &default_tensor_flat(0), default_tensor.TotalBytes(), cudaMemcpyHostToDevice);
+#endif  // TF_ENABLE_GPU_EV
+#endif  // GOOGLE_CUDA
+      } else {
+        alloc_ = cpu_allocator();
+        emb_config_.default_value_dim = default_value_dim;
+        value_len_ = default_tensor.NumElements()/emb_config_.default_value_dim;
+        default_value_ = TypedAllocator::Allocate<V>(alloc_, default_tensor.NumElements(), AllocationAttributes());
+        auto default_tensor_flat = default_tensor.flat<V>();
+        memcpy(default_value_, &default_tensor_flat(0), default_tensor.TotalBytes());
+      }
       if (LayoutType::NORMAL_CONTIGUOUS == storage_manager_->GetLayoutType()) {
         storage_manager_->SetAllocLen(value_len_, emb_config_.slot_num + 1);
       }
+
       return Status::OK();
     }
   }
@@ -113,6 +130,15 @@ class EmbeddingVar : public ResourceBase {
     update_version_fn_(value_ptr, gs);
   }
 
+  Status LookupOrCreateKey(K key, ValuePtr<V>** value_ptr, int64 update_version, bool &need_copyback) {
+    Status s = storage_manager_->GetOrCreate(key, value_ptr, emb_config_.total_num(storage_manager_->GetAllocLen()), need_copyback);
+    TF_CHECK_OK(s);
+    if (emb_config_.is_primary() && emb_config_.steps_to_live != 0 && update_version != -1) {
+      (*value_ptr)->SetStep(update_version);
+    }
+    return s;
+  }
+
   void BatchCommit(std::vector<K> keys, std::vector<ValuePtr<V>*> value_ptrs) {
     TF_CHECK_OK(storage_manager_->BatchCommit(keys, value_ptrs));
   }
@@ -134,9 +160,81 @@ class EmbeddingVar : public ResourceBase {
     add_freq_fn_(value_ptr, count, emb_config_.filter_freq);
   }
 
+  void LookupWithFreqBatch(K* keys, bool *init_flags, bool *copyback_flags, V** memcpy_address, int start, int limit) {
+    ValuePtr<V>* value_ptr = nullptr;
+    for (int i = start; i < limit; i++) {
+      TF_CHECK_OK(LookupOrCreateKey(keys[i], &value_ptr, -1, copyback_flags[i]));
+      if (!copyback_flags[i]) {
+        memcpy_address[i] = LookupOrCreateEmb(value_ptr, init_flags[i]);
+      } else {
+        //memcpy_address[i] = LookupOrCreateEmb(value_ptr, init_flags[i]);
+        memcpy_address[i] = value_ptr->GetValue(0,0);
+      }
+      value_ptr->AddFreq();
+    }
+  }
+
+  void BatchInitEmb(int64 size, V** memcpy_address, V* default_value, bool* init_flags, int64 value_len) {
+    filter_->BatchInitEmb(size, memcpy_address, default_value, init_flags, value_len);
+  }
+
+#if GOOGLE_CUDA
+#if !TF_ENABLE_GPU_EV
+  void CreateGPUBatch(V* val_base, V** default_values, int64 size, int64 slice_elems, bool* init_flags, V** memcpy_address) {
+    for (int i = 0;i < size;i++) {
+      default_values[i] = (default_values[i] == nullptr) ? default_value_ : default_values[i];
+    }
+    filter_->CreateGPUBatch(val_base, default_values, size, slice_elems, value_len_, init_flags, memcpy_address);
+  }
+
+  void CopyBackToGPU(K* keys, int64 size, bool* copyback_flags, V** memcpy_address) {
+    size_t value_len = emb_config_.total_num(storage_manager_->GetAllocLen());
+    V* memcpy_buffer_gpu;
+    V** dev_value_address, **value_address;
+    int total = 0;
+    for (int i = 0; i < size;i++) {
+      if (copyback_flags[i]) {
+        total++;
+      }
+    }
+    int *copyback_cursor = new int[total]();
+    ValuePtr<V>** gpu_value_ptrs = new ValuePtr<V>* [total];
+    cudaMalloc(&memcpy_buffer_gpu, total * value_len * sizeof(V));
+
+    storage_manager_->CopyBackToGPU(total, keys, size, copyback_flags, memcpy_address, value_len, copyback_cursor, gpu_value_ptrs, memcpy_buffer_gpu);
+
+    value_address = (V**)malloc(sizeof(V*) * total);
+    cudaMalloc(&dev_value_address, sizeof(V*) * total);
+
+    for (int i = 0;i < total;i++) {
+      bool init;
+      memcpy_address[copyback_cursor[i]] = LookupOrCreateEmb(gpu_value_ptrs[i], init);
+      value_address[i] = memcpy_address[copyback_cursor[i]];
+    }
+
+    cudaMemcpy(dev_value_address, value_address, sizeof(V*) * total, cudaMemcpyHostToDevice);
+    int block_dim = 128;
+    void* args[] = { (void*)&dev_value_address, (void*)&memcpy_buffer_gpu, (void*)&value_len, (void*)&total};
+
+    cudaLaunchKernel((void *)BatchUnpack<V>, (total + block_dim - 1) / block_dim * value_len, block_dim, args, 0, NULL);
+    cudaDeviceSynchronize();
+
+    cudaFree(dev_value_address);
+    cudaFree(memcpy_buffer_gpu);
+    delete []copyback_cursor;
+    delete []gpu_value_ptrs;
+  }
+#endif  // TF_ENABLE_GPU_EV
+#endif  // GOOGLE_CUDA
+
   V* LookupOrCreateEmb(ValuePtr<V>* value_ptr, const V* default_v) {
     return value_ptr->GetOrAllocate(alloc_, value_len_, default_v,
         emb_config_.emb_index, storage_manager_->GetOffset(emb_config_.emb_index));
+  }
+
+  V* LookupOrCreateEmb(ValuePtr<V>* value_ptr, bool &need_initialize) {
+    return value_ptr->GetOrAllocate(alloc_, value_len_, nullptr,
+        emb_config_.emb_index, storage_manager_->GetOffset(emb_config_.emb_index), need_initialize);
   }
 
   V* LookupPrimaryEmb(ValuePtr<V>* value_ptr) {
@@ -189,6 +287,10 @@ class EmbeddingVar : public ResourceBase {
 
   bool IsRecordVersion() {
     return emb_config_.record_version;
+  }
+
+  bool IsHBMDRAM() {
+    return embedding::StorageType::HBM_DRAM == storage_manager_->GetStorageType();
   }
 
   std::string DebugString() const {
@@ -265,6 +367,49 @@ class EmbeddingVar : public ResourceBase {
     return emb_config_.emb_index;
   }
 
+  Allocator* GetAllocator() {
+    return alloc_;
+  }
+
+  V** GetBuffer1(int64 size) {
+    if (buffer1_size >= size) {
+      return buffer1;
+    } else{
+      if (buffer1_size != 0) {
+        alloc_->DeallocateRaw(buffer1);
+      }
+      buffer1 = (V**)alloc_->AllocateRaw(0, size * sizeof(V*));
+      buffer1_size = size;
+      return buffer1;
+    }
+  }
+
+  V** GetBuffer2(int64 size) {
+    if (buffer2_size >= size) {
+      return buffer2;
+    } else {
+      if (buffer2_size != 0) {
+        alloc_->DeallocateRaw(buffer2);
+      }
+      buffer2 =(V**)alloc_->AllocateRaw(0, size * sizeof(V*));
+      buffer2_size = size;
+      return buffer2;
+    }
+  }
+
+  V** GetBuffer3(int64 size) {
+    if (buffer3_size >= size) {
+      return buffer3;
+    } else {
+      if (buffer3_size != 0) {
+        alloc_->DeallocateRaw(buffer3);
+      }
+      buffer3 = (V**)alloc_->AllocateRaw(0, size * sizeof(V*));
+      buffer3_size = size;
+      return buffer3;
+    }
+  }
+
  private:
   std::string name_;
   bool is_initialized_ = false;
@@ -272,6 +417,8 @@ class EmbeddingVar : public ResourceBase {
   mutex mu_;
 
   V* default_value_;
+  V **buffer1, **buffer2, **buffer3;
+  int64 buffer1_size, buffer2_size, buffer3_size;
   int64 value_len_;
   Allocator* alloc_;
   embedding::StorageManager<K, V>* storage_manager_;
@@ -286,7 +433,24 @@ class EmbeddingVar : public ResourceBase {
       Destroy();
       delete storage_manager_;
     }
-    TypedAllocator::Deallocate(cpu_allocator(), default_value_, value_len_);
+    if (embedding::StorageType::HBM_DRAM == storage_manager_->GetStorageType()) {
+      buffer1_size = 0;
+      buffer2_size = 0;
+      buffer3_size = 0;
+      if (buffer1 != nullptr) {
+        alloc_->DeallocateRaw(buffer1);
+        buffer1 = nullptr;
+      }
+      if (buffer2 != nullptr) {
+        alloc_->DeallocateRaw(buffer2);
+        buffer2 = nullptr;
+      }
+      if (buffer3 != nullptr) {
+        alloc_->DeallocateRaw(buffer3);
+        buffer3 = nullptr;
+      }
+    }
+    TypedAllocator::Deallocate(alloc_, default_value_, value_len_);
   }
   TF_DISALLOW_COPY_AND_ASSIGN(EmbeddingVar);
 };

@@ -49,7 +49,9 @@ from tensorflow.contrib.layers.python.layers import feature_column
 from tensorflow.python.training import checkpoint_utils
 from tensorflow.python.saved_model import builder as saved_model_builder
 from tensorflow.python.saved_model import loader
-
+from tensorflow.core.protobuf import config_pb2 as config_pb3
+import time
+import random
 
 class EmbeddingVariableTest(test_util.TensorFlowTestCase):
   def testSaveVersionWithGlobalStepEviction(self):
@@ -984,13 +986,14 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
         r, _, _ = sess.run([emb, train_op,loss])
         r, _, _ = sess.run([emb, train_op,loss])
         return r
-    emb_var = variable_scope.get_embedding_variable("var_1",
-          embedding_dim = 3,
-          initializer=init_ops.ones_initializer(dtypes.float32),
-          partitioner=partitioned_variables.fixed_size_partitioner(num_shards=1))
-    var = variable_scope.get_variable("var_2", shape=[100, 3], initializer=init_ops.ones_initializer(dtypes.float32))
-    emb1 = runTestAdagrad(self, emb_var)
-    emb2 = runTestAdagrad(self, var)
+    with ops.Graph().as_default() as g, ops.device('/cpu:0'):
+      emb_var = variable_scope.get_embedding_variable("var_1",
+            embedding_dim = 3,
+            initializer=init_ops.ones_initializer(dtypes.float32),
+            partitioner=partitioned_variables.fixed_size_partitioner(num_shards=1))
+      var = variable_scope.get_variable("var_2", shape=[100, 3], initializer=init_ops.ones_initializer(dtypes.float32))
+      emb1 = runTestAdagrad(self, emb_var)
+      emb2 = runTestAdagrad(self, var)
 
     for i in range(0, 6):
       for j in range(0, 3):
@@ -1225,39 +1228,41 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
 
   def testEmbeddingVariableForGeneralConstInitializer(self):
     print("testEmbeddingVariableForGeneralConstInitializer")
-    var = variable_scope.get_embedding_variable("var_1",
-            embedding_dim = 3,
-            initializer=init_ops.ones_initializer(dtypes.float32),
-            partitioner=partitioned_variables.fixed_size_partitioner(num_shards=4))
-    emb = embedding_ops.embedding_lookup(var, math_ops.cast([1,6], dtypes.int64))
-    init = variables.global_variables_initializer()
-    with self.test_session() as sess:
-      sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_VAR_OPS))
-      sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_SLOT_OPS))
-      sess.run([init])
-      emb_val = sess.run(emb)
-      for i in xrange(2):
-        for j in xrange(3):
-          self.assertAlmostEqual(1.0, emb_val[i][j], delta=1e-05)
+    with ops.Graph().as_default() as g, ops.device('/cpu:0'):
+      var = variable_scope.get_embedding_variable("var_1",
+              embedding_dim = 3,
+              initializer=init_ops.ones_initializer(dtypes.float32),
+              partitioner=partitioned_variables.fixed_size_partitioner(num_shards=4))
+      emb = embedding_ops.embedding_lookup(var, math_ops.cast([1,6], dtypes.int64))
+      init = variables.global_variables_initializer()
+      with self.test_session() as sess:
+        sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_VAR_OPS))
+        sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_SLOT_OPS))
+        sess.run([init])
+        emb_val = sess.run(emb)
+        for i in xrange(2):
+          for j in xrange(3):
+            self.assertAlmostEqual(1.0, emb_val[i][j], delta=1e-05)
 
   def testEmbeddingVariableForGeneralRandomInitializer(self):
     print("testEmbeddingVariableForGeneralRandomInitializer")
-    var = variable_scope.get_embedding_variable("var_1",
-            embedding_dim = 3,
-            #initializer=init_ops.ones_initializer(dtypes.float32),
-            partitioner=partitioned_variables.fixed_size_partitioner(num_shards=4))
-    emb = embedding_ops.embedding_lookup(var, math_ops.cast([1,6], dtypes.int64))
-    init = variables.global_variables_initializer()
-    with self.test_session() as sess:
-      sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_VAR_OPS))
-      sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_SLOT_OPS))
-      sess.run([init])
-      emb_val = sess.run(emb)
-      print(emb_val)
-      for i in xrange(3):
-        self.assertNotEqual(emb_val[0][i], emb_val[1][i])
-        self.assertNotEqual(emb_val[0][i], emb_val[1][i])
-        self.assertNotEqual(emb_val[0][i], emb_val[1][i])
+    with ops.Graph().as_default() as g, ops.device('/cpu:0'):
+      var = variable_scope.get_embedding_variable("var_1",
+              embedding_dim = 3,
+              #initializer=init_ops.ones_initializer(dtypes.float32),
+              partitioner=partitioned_variables.fixed_size_partitioner(num_shards=4))
+      emb = embedding_ops.embedding_lookup(var, math_ops.cast([1,6], dtypes.int64))
+      init = variables.global_variables_initializer()
+      with self.test_session() as sess:
+        sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_VAR_OPS))
+        sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_SLOT_OPS))
+        sess.run([init])
+        emb_val = sess.run(emb)
+        print(emb_val)
+        for i in xrange(3):
+          self.assertNotEqual(emb_val[0][i], emb_val[1][i])
+          self.assertNotEqual(emb_val[0][i], emb_val[1][i])
+          self.assertNotEqual(emb_val[0][i], emb_val[1][i])
 
   def testEmbeddingVariableForHTPartitionNum(self):
     print("testEmbeddingVariableForHTPartitionNum")
@@ -1305,7 +1310,7 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
         r, _, _ = sess.run([emb, train_op,loss])
         r, _, _ = sess.run([emb, train_op,loss])
         return r
-    with ops.Graph().as_default() as g:
+    with ops.Graph().as_default() as g, ops.device('/cpu:0'):
       emb_var = variable_scope.get_embedding_variable("var_1",
             embedding_dim = 3,
             initializer=init_ops.ones_initializer(dtypes.float32),
@@ -1318,7 +1323,7 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
         for j in range(0, 3):
           self.assertEqual(emb1.tolist()[i][j], emb2.tolist()[i][j])
 
-    with ops.Graph().as_default() as g:
+    with ops.Graph().as_default() as g, ops.device('/cpu:0'):
       emb_var = variable_scope.get_embedding_variable("var_1",
             embedding_dim = 3,
             initializer=init_ops.ones_initializer(dtypes.float32),
@@ -1346,7 +1351,7 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
 
   def testEVInitializerWithKeyFetch(self):
     print("testEVInitializerWithKeyFetch")
-    with ops.Graph().as_default() as g:
+    with ops.Graph().as_default() as g, ops.device('/cpu:0'):
       var = variable_scope.get_variable("var", shape=[8,3],
                                         initializer=init_ops.glorot_uniform_initializer(seed = 1))
       init_opt = variables.InitializerOption(initializer=init_ops.glorot_uniform_initializer(seed = 1),
@@ -1385,7 +1390,7 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
       return is_match
 
     print("testEVInitializerWithCounterFeatureFilter")
-    with ops.Graph().as_default() as g:
+    with ops.Graph().as_default() as g, ops.device('/cpu:0'):
       var = variable_scope.get_variable("var", shape=[8,3],
                                         initializer=init_ops.glorot_uniform_initializer(seed = 1))
       counter_filter_option=variables.CounterFilter(filter_freq=3)
@@ -1423,7 +1428,7 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
       return is_match
 
     print("testEVInitializerWithBloomFeatureFilter")
-    with ops.Graph().as_default() as g:
+    with ops.Graph().as_default() as g, ops.device('/cpu:0'):
       var = variable_scope.get_variable("var", shape=[8,3],
                                         initializer=init_ops.glorot_uniform_initializer(seed = 1))
       bloom_filter_option=variables.CBFFilter(
@@ -1473,7 +1478,7 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
         r, _, _ = sess.run([emb, train_op, loss])
         return r
     print("testEVInitializer")
-    with ops.Graph().as_default() as g:
+    with ops.Graph().as_default() as g, ops.device('/cpu:0'):
       init = variables.InitializerOption(default_value_dim=8192)
       ev_option = variables.EmbeddingVariableOption(init_option = init)
       emb_var = variable_scope.get_embedding_variable("emb_var", embedding_dim = 6,
@@ -1492,7 +1497,10 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
   def testEmbeddingVariableForDRAM(self):
     print("testEmbeddingVariableForDRAM")
     def runTestAdagrad(self, var, g):
-      emb = embedding_ops.embedding_lookup(var, math_ops.cast([0,1,2,5,6,7], dtypes.int64))
+      search_list=[]
+      for i in range(0, 1024 * 2):
+        search_list.append(i)
+      emb = embedding_ops.embedding_lookup(var, math_ops.cast(search_list, dtypes.int64))
       fun = math_ops.multiply(emb, 2.0, name='multiply')
       loss = math_ops.reduce_sum(fun, name='reduce_sum')
       gs = training_util.get_or_create_global_step()
@@ -1500,31 +1508,37 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
       g_v = opt.compute_gradients(loss)
       train_op = opt.apply_gradients(g_v)
       init = variables.global_variables_initializer()
+      #print(ops.get_default_graph().as_graph_def())
+      #config = config_pb3.ConfigProto(log_device_placement=True)
       with self.test_session(graph=g) as sess:
         sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_VAR_OPS))
         sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_SLOT_OPS))
         sess.run([init])
-        r, _, _ = sess.run([emb, train_op,loss])
-        r, _, _ = sess.run([emb, train_op,loss])
-        r, _, _ = sess.run([emb, train_op,loss])
+        r = sess.run([emb])
         r, _, _ = sess.run([emb, train_op,loss])
         r, _, _ = sess.run([emb, train_op,loss])
         return r
 
-    with ops.Graph().as_default() as g:
+    with ops.Graph().as_default() as g, ops.device('/cpu:0'):
       emb_var = variable_scope.get_embedding_variable("var_1",
-            embedding_dim = 3,
+            embedding_dim = 128,
             initializer=init_ops.ones_initializer(dtypes.float32),
             partitioner=partitioned_variables.fixed_size_partitioner(num_shards=1),
             steps_to_live=5,
             ev_option = variables.EmbeddingVariableOption(storage_option=variables.StorageOption(storage_type=config_pb2.StorageType.DRAM)))
-      var = variable_scope.get_variable("var_2", shape=[100, 3], initializer=init_ops.ones_initializer(dtypes.float32))
+      var = variable_scope.get_variable("var_2", shape=[1024 * 512, 3], initializer=init_ops.ones_initializer(dtypes.float32))
+      time_start = time.time()
       emb1 = runTestAdagrad(self, emb_var, g)
-      emb2 = runTestAdagrad(self, var, g)
+      print(emb1)
+      time_end = time.time()
+      time_c = time_end - time_start
+      print('time cost', time_c, 's')
+      #emb2 = runTestAdagrad(self, var, g)
+      #print(emb2)
 
-      for i in range(0, 6):
-        for j in range(0, 3):
-          self.assertEqual(emb1.tolist()[i][j], emb2.tolist()[i][j])
+      #for i in range(0, 6):
+        #for j in range(0, 3):
+          #self.assertEqual(emb1.tolist()[i][j], emb2.tolist()[i][j])
 
   def testEmbeddingVariableForLEVELDBWithAdagrad(self):
     print("testEmbeddingVariableForLEVELDBWithAdagrad")
@@ -1550,7 +1564,7 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
         print(r)
         return r
 
-    with ops.Graph().as_default() as g:
+    with ops.Graph().as_default() as g, ops.device('/cpu:0'):
       emb_var = variable_scope.get_embedding_variable("var_1",
             embedding_dim = 3,
             initializer=init_ops.ones_initializer(dtypes.float32),
@@ -1569,28 +1583,29 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
   def testEmbeddingVariableForLEVELDBwithFilter(self):
     print("testEmbeddingVariableForLEVELDBwithFilter")
     db_directory = self.get_temp_dir()
-    var = variable_scope.get_embedding_variable("var_1",
-            embedding_dim = 3,
-            initializer=init_ops.ones_initializer(dtypes.float32),
-            ev_option = variables.EmbeddingVariableOption(filter_option=variables.CounterFilter(filter_freq=3),
-                             storage_option=variables.StorageOption(storage_type=config_pb2.StorageType.LEVELDB,
-                                                                    storage_path=db_directory)),
-            partitioner=partitioned_variables.fixed_size_partitioner(num_shards=1))
-    emb = embedding_ops.embedding_lookup(var, math_ops.cast([1], dtypes.int64))
-    fun = math_ops.multiply(emb, 2.0, name='multiply')
-    loss = math_ops.reduce_sum(fun, name='reduce_sum')
-    gs = training_util.get_or_create_global_step()
-    opt = adagrad_decay.AdagradDecayOptimizer(0.1, gs)
-    g_v = opt.compute_gradients(loss)
-    train_op = opt.apply_gradients(g_v)
-    init = variables.global_variables_initializer()
-    with self.test_session() as sess:
-      sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_VAR_OPS))
-      sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_SLOT_OPS))
-      sess.run([init])
-      emb1, top, l = sess.run([emb, train_op, loss])
-      emb1, top, l = sess.run([emb, train_op, loss])
-      emb1, top, l = sess.run([emb, train_op, loss])
+    with ops.Graph().as_default() as g, ops.device('/cpu:0'):
+      var = variable_scope.get_embedding_variable("var_1",
+              embedding_dim = 3,
+              initializer=init_ops.ones_initializer(dtypes.float32),
+              ev_option = variables.EmbeddingVariableOption(filter_option=variables.CounterFilter(filter_freq=3),
+                               storage_option=variables.StorageOption(storage_type=config_pb2.StorageType.LEVELDB,
+                                                                      storage_path=db_directory)),
+              partitioner=partitioned_variables.fixed_size_partitioner(num_shards=1))
+      emb = embedding_ops.embedding_lookup(var, math_ops.cast([1], dtypes.int64))
+      fun = math_ops.multiply(emb, 2.0, name='multiply')
+      loss = math_ops.reduce_sum(fun, name='reduce_sum')
+      gs = training_util.get_or_create_global_step()
+      opt = adagrad_decay.AdagradDecayOptimizer(0.1, gs)
+      g_v = opt.compute_gradients(loss)
+      train_op = opt.apply_gradients(g_v)
+      init = variables.global_variables_initializer()
+      with self.test_session() as sess:
+        sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_VAR_OPS))
+        sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_SLOT_OPS))
+        sess.run([init])
+        emb1, top, l = sess.run([emb, train_op, loss])
+        emb1, top, l = sess.run([emb, train_op, loss])
+        emb1, top, l = sess.run([emb, train_op, loss])
 
   def testEmbeddingVariableForLEVELDBWithGradientDescent(self):
     print("testEmbeddingVariableForLEVELDBWithGradientDescent")
@@ -1904,7 +1919,7 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
       for i in range(6):
         for j in range(3):
           self.assertAlmostEqual(emb_ori[i][j], emb_right[i][j])
-  
+
   def testEmbeddingVariableForDRAMAndLEVELDB(self):
     print("testEmbeddingVariableForDRAMAndLEVELDB")
     def runTestAdagrad(self, var, g):
@@ -1926,7 +1941,7 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
           r, _, _ = sess.run([emb, train_op, loss])
         return r
 
-    with ops.Graph().as_default() as g:
+    with ops.Graph().as_default() as g, ops.device('/cpu:0'):
       db_directory = self.get_temp_dir()
       emb_var = variable_scope.get_embedding_variable("var_1",
             embedding_dim = 30,
@@ -1968,7 +1983,7 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
         r = sess.run(emb)
         return r
 
-    with ops.Graph().as_default() as g:
+    with ops.Graph().as_default() as g, ops.device('/cpu:0'):
       db_directory = self.get_temp_dir()
       emb_var = variable_scope.get_embedding_variable("var_1",
             embedding_dim = 30,
@@ -2063,6 +2078,54 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
           self.assertEqual(ckpt_value.tolist()[1], 1)
     os.environ["TF_RECORD_FREQ"] = "0"
     os.environ["TF_RECORD_VERSION"] = "0"
+
+'''
+  @test_util.run_gpu_only
+  def testEmbeddingVariableForHBMandDRAM(self):
+    print("testEmbeddingVariableForHBMandDRAM")
+    def runTestAdagrad(self, var, g):
+      search_list = []
+      for i in range(0, 10 * 8):
+        search_list.append(i)
+      emb = embedding_ops.embedding_lookup(var, math_ops.cast(search_list, dtypes.int64))
+
+      fun = math_ops.multiply(emb, 2.0, name='multiply')
+      loss = math_ops.reduce_sum(fun, name='reduce_sum')
+      gs = training_util.get_or_create_global_step()
+      opt = adagrad.AdagradOptimizer(0.1)
+      g_v = opt.compute_gradients(loss)
+      train_op = opt.apply_gradients(g_v)
+
+      init = variables.global_variables_initializer()
+      config = config_pb3.ConfigProto(log_device_placement=True)
+      with self.test_session(graph=g, config=config, force_gpu=True) as sess:
+        sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_VAR_OPS))
+        sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_SLOT_OPS))
+        sess.run([init])
+        r = sess.run(emb)
+        r, _, _ = sess.run([emb, train_op, loss])
+        r, _, _ = sess.run([emb, train_op, loss])
+        r, _, _ = sess.run([emb, train_op, loss])
+        return r
+
+    with ops.Graph().as_default() as g, ops.device('/gpu:0'):
+      emb_var = variable_scope.get_embedding_variable("var_1",
+          embedding_dim = 128,
+          initializer=init_ops.ones_initializer(dtypes.float32),
+          partitioner=partitioned_variables.fixed_size_partitioner(num_shards=1),
+          #steps_to_live=5,
+          ev_option = variables.EmbeddingVariableOption(storage_option=variables.StorageOption(storage_type=config_pb2.StorageType.HBM_DRAM)))
+      var = variable_scope.get_variable("var_2", shape=[1024, 128], initializer=init_ops.ones_initializer(dtypes.float32))
+
+      emb1 = runTestAdagrad(self, emb_var, g)
+      emb2 = runTestAdagrad(self, var, g)
+      print(emb1)
+      print(emb2)
+
+    for i in range(0, 6):
+      for j in range(0, 3):
+        self.assertEqual(emb1[i][j], emb2[i][j])
+'''
 
 if __name__ == "__main__":
   googletest.main()

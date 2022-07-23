@@ -7,6 +7,12 @@
 #include <memory>
 
 #include "tensorflow/core/framework/typed_allocator.h"
+#if GOOGLE_CUDA
+#if !TF_ENABLE_GPU_EV
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+#endif  // TF_ENABLE_GPU_EV
+#endif  // GOOGLE_CUDA
 
 namespace tensorflow {
 
@@ -205,7 +211,7 @@ class ValuePtr {
       }
       embnum++ ;
       int64 alloc_value_len = value_len;
-      V* tensor_val = (V*)allocator->AllocateRaw(0/*alignemnt unused*/, sizeof(V) * alloc_value_len);
+      V* tensor_val = (V*)allocator->AllocateRaw(0/*alignment unused*/, sizeof(V) * alloc_value_len);
       memcpy(tensor_val, default_v, sizeof(V) * value_len);
       ((V**)((int64*)ptr_ + meta->GetHeaderSize()))[emb_index]  = tensor_val;
 
@@ -219,6 +225,10 @@ class ValuePtr {
     } else {
       return ((V**)((int64*)ptr_ + meta->GetHeaderSize()))[emb_index];
     }
+  }
+
+  virtual V* GetOrAllocate(Allocator* allocator, int64 value_len, const V* default_v, int emb_index, int offset, bool &need_initialize) {
+
   }
 
   // simple getter for V* and version
@@ -353,7 +363,7 @@ class NormalContiguousValuePtr : public ValuePtr<V>{
     memset(this->ptr_ + sizeof(FixedLengthHeader), 0, sizeof(V) * size);
     new ((char*)this->ptr_) FixedLengthHeader();
    }
-  
+
    ~NormalContiguousValuePtr(){
    }
 
@@ -389,7 +399,7 @@ class NormalContiguousValuePtr : public ValuePtr<V>{
   virtual void Destroy(Allocator* allocator) {
     allocator->DeallocateRaw(this->ptr_);
   }
-  
+
   int64 GetStep() {
     return ((FixedLengthHeader*)this->ptr_)->GetGlobalStep();
   }
@@ -415,10 +425,106 @@ class NormalContiguousValuePtr : public ValuePtr<V>{
   }
 
   void SetValue(V val, size_t size){
-    for(int i = 0; i < size; ++i) {
+    for (int i = 0; i < size; ++i) {
       *((V*)this->ptr_ + sizeof(FixedLengthHeader) / sizeof(V) + i) = val;
     }
   }
+};
+
+template <class V>
+class NormalGPUValuePtr : public ValuePtr<V> {
+ public:
+  NormalGPUValuePtr(Allocator* allocator, size_t size) {
+    this->ptr_ = (void*) malloc(sizeof(FixedLengthHeader) + sizeof(V *));
+    alloc_ = allocator;
+    *(V**)((char *)this->ptr_ + sizeof(FixedLengthHeader)) = (V*)allocator->AllocateRaw(0/*alignment unused*/, sizeof(V) * size);
+    new ((char*)this->ptr_) FixedLengthHeader();
+  }
+
+  ~NormalGPUValuePtr() {
+    free(this->ptr_);
+  }
+
+#if GOOGLE_CUDA
+#if !TF_ENABLE_GPU_EV
+  virtual V* GetOrAllocate(Allocator* allocator, int64 value_len, const V* default_v, int emb_index, int offset) override {
+    int8 meta = *((int8*)((char*)this->ptr_ + 6));
+    std::bitset<8> bs(meta);
+    if (!bs.test(emb_index)) {
+      while(this->flag_.test_and_set(std::memory_order_acquire));
+      if (bs.test(emb_index))
+        return *(V**)((char *)this->ptr_ + sizeof(FixedLengthHeader)) + offset;
+      V* tensor_val = *(V**)((char *)this->ptr_ + sizeof(FixedLengthHeader)) + offset;
+      cudaMemcpy(tensor_val, default_v, value_len * sizeof(V), cudaMemcpyDeviceToDevice);
+      int8* m = (int8*)((char*)this->ptr_ + 6);
+      *m |= (1 <<  emb_index);
+      this->flag_.clear(std::memory_order_release);
+      return *(V**)((char *)this->ptr_ + sizeof(FixedLengthHeader)) + offset;
+    } else {
+      return *(V**)((char *)this->ptr_ + sizeof(FixedLengthHeader)) + offset;
+    }
+  }
+#endif  // TF_ENABLE_GPU_EV
+#endif  // GOOGLE_CUDA
+
+  virtual V* GetOrAllocate(Allocator* allocator, int64 value_len, const V* default_v, int emb_index, int offset, bool &need_initialize) override {
+    int8 meta = *((int8*)((char*)this->ptr_ + 6));
+    std::bitset<8> bs(meta);
+    if (!bs.test(emb_index)) {
+      while(this->flag_.test_and_set(std::memory_order_acquire));
+      if (bs.test(emb_index))
+        return *(V**)((char *)this->ptr_ + sizeof(FixedLengthHeader)) + offset;
+      V* tensor_val = *(V**)((char *)this->ptr_ + sizeof(FixedLengthHeader)) + offset;
+      need_initialize = 1;
+      int8* m = (int8*)((char*)this->ptr_ + 6);
+      *m |= (1 <<  emb_index);
+      this->flag_.clear(std::memory_order_release);
+      return *(V**)((char *)this->ptr_ + sizeof(FixedLengthHeader)) + offset;
+    } else {
+      return *(V**)((char *)this->ptr_ + sizeof(FixedLengthHeader)) + offset;
+    }
+  }
+
+  // simple getter for V* and version
+  virtual V* GetValue(int emb_index, int offset) {
+    int8 meta = *((int8*)((char*)this->ptr_ + 6));
+    std::bitset<8> bs(meta);
+    if (bs.test(emb_index)) {
+      return *(V**)((char *)this->ptr_ + sizeof(FixedLengthHeader)) + offset;
+    } else {
+      return nullptr;
+    }
+  }
+
+  virtual void Destroy(Allocator* allocator) {
+    alloc_->DeallocateRaw(*(V**)((char *)this->ptr_ + sizeof(FixedLengthHeader)));
+  }
+
+  int64 GetStep() {
+    return ((FixedLengthHeader*)this->ptr_)->GetGlobalStep();
+  }
+
+  void SetStep(int64 gs) {
+    ((FixedLengthHeader*)this->ptr_)->SetGlobalStep(gs);
+  }
+
+  int64 GetFreq() {
+    return ((FixedLengthHeader*)this->ptr_)->GetFreqCounter();
+  }
+
+  void SetFreq(int64 freq) {
+    ((FixedLengthHeader*)this->ptr_)->SetFreqCounter(freq);
+  }
+
+  void AddFreq() {
+    ((FixedLengthHeader*)this->ptr_)->AddFreq();
+  }
+
+  void AddFreq(int64 count) {
+    ((FixedLengthHeader*)this->ptr_)->AddFreq(count);
+  }
+  private:
+    Allocator *alloc_;
 };
 
 }  // namespace tensorflow
