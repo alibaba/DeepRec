@@ -2,7 +2,7 @@
 
 ## 介绍
 
-[oneDNN](https://github.com/oneapi-src/oneDNN) 是 Intel 开源的跨平台深度学习性能加速库，通过 [文档](https://oneapi-src.github.io/oneDNN/) 可以了解到被支持的原语，DeepRec 中已经加入了 oneDNN 的支持，只需要在 DeepRec 编译命令中加入关于 oneDNN 的编译选项：`--config=mkl_threadpool` 即可开启 oneDNN 加速算子计算。在支持 AVX512 指令集的机器（Sky Lake 及其之后的 CPU）上添加 `-c opt` 选项，默认会打开 `--copt=-march=skylake-avx512` 的优化，可以进一步加速算子计算性能。
+[oneDNN](https://github.com/oneapi-src/oneDNN) 是 Intel 开源的跨平台深度学习性能加速库，通过 [文档](https://oneapi-src.github.io/oneDNN/) 可以了解到被支持的原语，DeepRec 中已经加入了 oneDNN 的支持，只需要在 DeepRec 编译命令中加入关于 oneDNN 的编译选项：`--config=mkl_threadpool` 即可开启 oneDNN 加速算子计算。在支持 AVX512 指令集的机器（Sky Lake 及其之后的 CPU）上添加 `--config=opt` 选项，默认会打开 `--copt=-march=native` 的优化，可以进一步加速算子计算性能。
 
 Tips: MKL-DNN 被重命名为 DNNL，之后又被重命名为 oneDNN；TensorFlow 初期采用的是 MKL 加速算子计算，在之后的版本迭代中，逐步使用 oneDNN 替换了 MKL，但宏定义还是仍然保留。
 
