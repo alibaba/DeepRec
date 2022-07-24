@@ -466,10 +466,10 @@ REGISTER_OP("KvResourceExport")
     .Attr("Tvalues: type")
     .SetShapeFn([](InferenceContext* c) {
       ShapeHandle values = c->UnknownShape();
-      TF_RETURN_IF_ERROR(c->WithRankAtLeast(values, 1, &values));
-      ShapeHandle keys = c->UnknownShapeOfRank(2);
-      ShapeHandle versions = c->UnknownShapeOfRank(3);
-      ShapeHandle freqs = c->UnknownShapeOfRank(4);
+      TF_RETURN_IF_ERROR(c->WithRankAtLeast(values, 2, &values));
+      ShapeHandle keys = c->UnknownShapeOfRank(1);
+      ShapeHandle versions = c->UnknownShapeOfRank(1);
+      ShapeHandle freqs = c->UnknownShapeOfRank(1);
       c->set_output(0, keys);
       c->set_output(1, values);
       c->set_output(2, versions);

@@ -227,10 +227,16 @@ class BaseSaverBuilder(object):
 
     for saveable in saveables:
       if isinstance(saveable, BaseSaverBuilder.EmbeddingVariableSaveable):
-        tensor_names.append(saveable.name)
-        tensors.append(saveable.handle_op)
-        tensor_slices.append("")
-        ev_key_types.append(saveable.key_type)
+        if "GPU" in saveable.var.device:
+          for spec in saveable.specs:
+            tensor_names.append(spec.name)
+            tensors.append(spec.tensor)
+            tensor_slices.append(spec.slice_spec)
+        else:
+          tensor_names.append(saveable.name)
+          tensors.append(saveable.handle_op)
+          tensor_slices.append("")
+          ev_key_types.append(saveable.key_type)
         continue
       for spec in saveable.specs:
         tensor_names.append(spec.name)

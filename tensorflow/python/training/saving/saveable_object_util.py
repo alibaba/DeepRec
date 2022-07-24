@@ -169,13 +169,21 @@ class EmbeddingVariableSaveable(saveable_object.SaveableObject):
           return array_ops.identity(x)
       return f
     #unused_tensor = _read_variable_closure(var)
-    unused_tensor = var.handle
+    #unused_tensor = var.handle
+    unused_tensor = kv_variable_ops.identity(var)
 
     specs = []
-    specs.append(saveable_object.SaveSpec(unused_tensor, "", name + "-keys", dtype=self.key_type, device=var.device))
-    specs.append(saveable_object.SaveSpec(unused_tensor, "", name + "-values", dtype=dtypes.float32, device=var.device))
-    specs.append(saveable_object.SaveSpec(unused_tensor, "", name + "-versions", dtype=dtypes.int64, device=var.device))
-    specs.append(saveable_object.SaveSpec(unused_tensor, "", name + "-freqs", dtype=dtypes.int64, device=var.device))
+    if isinstance(unused_tensor, list):
+      specs.append(saveable_object.SaveSpec(unused_tensor[0], "", name + "-keys", dtype=self.key_type, device=unused_tensor[0].device))
+      specs.append(saveable_object.SaveSpec(unused_tensor[1], "", name + "-values", dtype=dtypes.float32, device=unused_tensor[1].device))
+      specs.append(saveable_object.SaveSpec(unused_tensor[2], "", name + "-versions", dtype=dtypes.int64, device=unused_tensor[2].device))
+      specs.append(saveable_object.SaveSpec(unused_tensor[3], "", name + "-freqs", dtype=dtypes.int64, device=unused_tensor[2].device))
+    else:
+      specs.append(saveable_object.SaveSpec(unused_tensor, "", name + "-keys", dtype=self.key_type, device=var.device))
+      specs.append(saveable_object.SaveSpec(unused_tensor, "", name + "-values", dtype=dtypes.float32, device=var.device))
+      specs.append(saveable_object.SaveSpec(unused_tensor, "", name + "-versions", dtype=dtypes.int64, device=var.device))
+      specs.append(saveable_object.SaveSpec(unused_tensor, "", name + "-freqs", dtype=dtypes.int64, device=var.device))
+
     # pylint: disable=protected-access
     super(EmbeddingVariableSaveable, self).__init__(var, specs, name)
     self.is_sparse = var._is_sparse

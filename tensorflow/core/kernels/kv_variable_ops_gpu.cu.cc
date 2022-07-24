@@ -292,6 +292,59 @@ struct KvLookupCreateEmb<GPUDevice, Key, Value> {
 }
 };
 
+template <typename Key, typename Value>
+__global__ void kv_update_emb_kernel(const Key* key_first,
+                                               Value* default_v,
+                                               int64 dim,
+                                               int32* item_idxs,
+                                               int32 slot_idx,
+                                               Value** d_banks,
+                                               bool** d_flags,
+                                               int32 slot_num,
+                                               int32 default_v_num,
+                                               int32 bank_size) {
+  auto item_idx = blockIdx.x;
+  auto item_pos = item_idxs[item_idx];
+  auto bank_idx = item_pos / bank_size;
+  auto offset_in_bank = item_pos % bank_size;
+  auto slot_offset = bank_idx * slot_num + slot_idx;
+  bool stored = d_flags[slot_offset][offset_in_bank];
+  __syncthreads();
+  if (stored == false) {
+    d_flags[slot_offset][offset_in_bank] = true;
+    for (auto id = threadIdx.x; id < dim; id += blockDim.x) {
+      int32 default_v_idx;
+      default_v_idx = item_idx % default_v_num;
+      d_banks[slot_offset][offset_in_bank * dim + id] = default_v[default_v_idx * dim + id];
+    }
+  }
+}
+
+template <typename Key, typename Value>
+struct KvUpdateEmb<GPUDevice, Key, Value> {
+  void operator()(const Key* key_first,
+                  Value* default_v,
+                  int64 dim,
+                  int32* item_idxs,
+                  int32 num_items,
+                  int32 slot_idx,
+                  int32 default_v_num,
+                  Value** d_banks,
+                  bool** d_flags,
+                  int32 slot_num,
+                  int32 bank_size,
+                  cudaStream_t stream) {
+  auto const block_size = 256;
+  auto const grid_size = num_items;
+  TF_CHECK_OK(GpuLaunchKernel(kv_update_emb_kernel<Key, Value>,
+                              grid_size, block_size, 0, stream,
+                              key_first, default_v, dim,
+                              item_idxs, slot_idx,
+                              d_banks, d_flags,
+                              slot_num, default_v_num, bank_size));
+}
+};
+
 template <typename Key,
           typename ViewT,
           typename Hash     = cuco::detail::MurmurHash3_32<Key>,
@@ -429,6 +482,11 @@ template struct functor::KvEmbGetSnapshot<GPUDevice, int32, float>;
 template struct functor::KvEmbGetSnapshot<GPUDevice, int32, double>;
 template struct functor::KvEmbGetSnapshot<GPUDevice, int64, float>;
 template struct functor::KvEmbGetSnapshot<GPUDevice, int64, double>;
+
+template struct functor::KvUpdateEmb<GPUDevice, int32, float>;
+template struct functor::KvUpdateEmb<GPUDevice, int32, double>;
+template struct functor::KvUpdateEmb<GPUDevice, int64, float>;
+template struct functor::KvUpdateEmb<GPUDevice, int64, double>;
 
 }  // namespace tensorflow
 
