@@ -98,8 +98,12 @@ def eval(sess, test_data, model, model_path):
     stored_arr = []
     for src, tgt in test_data:
         nums += 1
+        
         uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, noclk_mids, noclk_cats = prepare_data(
             src, tgt, return_neg=True)
+
+
+
         prob, loss, acc, aux_loss = model.calculate(sess, [
             uids, mids, cats, mid_his, cat_his, mid_mask, target, sl,
             noclk_mids, noclk_cats
@@ -170,7 +174,7 @@ def train(data_location='data',
                                  maxlen,
                                  data_location=data_location)
         n_uid, n_mid, n_cat = train_data.get_n()
-
+    
         if bf16:
             model = Model_DIN_V2_Gru_Vec_attGru_Neg_bf16(
                 n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE,
