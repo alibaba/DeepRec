@@ -280,7 +280,8 @@ class AdamOptimizer(optimizer.Optimizer):
         math_ops.cast(self._beta1_t, grad.dtype),
         math_ops.cast(self._beta2_t, grad.dtype),
         math_ops.cast(self._epsilon_t, grad.dtype),
-        grad, indices, global_step, use_locking=self._use_locking)
+        grad, indices, global_step, use_locking=self._use_locking,
+        weight_decay=0.0, apply_weight_decay=False)
     else:
       return self._resource_apply_sparse_shared(grad, var, indices,
           self._resource_scatter_add)

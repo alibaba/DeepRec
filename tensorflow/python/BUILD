@@ -7365,3 +7365,22 @@ cuda_py_test(
     ],
     xla_enable_strict_auto_jit = True,
 )
+
+py_test(
+    name = "weight_decay_optimizers_test",
+    srcs = ["training/weight_decay_optimizers_test.py"],
+    python_version = "PY2",
+    srcs_version = "PY2AND3",
+    deps = [
+        "//tensorflow/python:array_ops",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:constant_op",
+        "//tensorflow/python:dtypes",
+        "//tensorflow/python:framework_ops",
+        "//tensorflow/python:math_ops",
+        "//tensorflow/python:resource_variable_ops",
+        "//tensorflow/python:session",
+        "//tensorflow/python:variables",
+        "//third_party/py/numpy",
+    ],
+)

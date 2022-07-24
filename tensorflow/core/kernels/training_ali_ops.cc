@@ -1172,6 +1172,7 @@ class KvSparseApplyAdamOp : public OpKernel {
  public:
   explicit KvSparseApplyAdamOp(OpKernelConstruction* ctx) : OpKernel(ctx) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("use_locking", &use_exclusive_lock_));
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("apply_weight_decay", &apply_weight_decay_));
   }
 
   void Compute(OpKernelContext* ctx) override NO_THREAD_SAFETY_ANALYSIS {
@@ -1198,6 +1199,7 @@ class KvSparseApplyAdamOp : public OpKernel {
     const Tensor& grad = ctx->input(9);
     const Tensor& indices = ctx->input(10);
     const Tensor& global_step = ctx->input(11);
+    const Tensor& weight_decay = ctx->input(12);
 
     OP_REQUIRES(
         ctx, TensorShapeUtils::IsScalar(beta1_power.shape()),
@@ -1226,6 +1228,10 @@ class KvSparseApplyAdamOp : public OpKernel {
     OP_REQUIRES(
         ctx, TensorShapeUtils::IsVector(indices.shape()),
         errors::InvalidArgument("indices must be one-dimensional"));
+      
+    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(weight_decay.shape()),
+                errors::InvalidArgument("weight_decay is not a scalar: ",
+                                        weight_decay.shape().DebugString()));
 
     int64 inner_dim = 1;
     TensorShape var_shape({var->ValueLen()});
@@ -1258,13 +1264,15 @@ class KvSparseApplyAdamOp : public OpKernel {
       T beta1_scalar = beta1.scalar<T>()();
       T beta2_scalar = beta2.scalar<T>()();
       T epsilon_scalar = epsilon.scalar<T>()();
+      T weight_decay_scalar = weight_decay.scalar<T>()();
       const T alpha = lr_scalar *
           Eigen::numext::sqrt(static_cast<T>(1) - beta2_power_scalar) /
           (static_cast<T>(1) - beta1_power_scalar);
 
       auto DoWork = [this, ctx, inner_dim, &var, &m, &v, &grad, &indices,
            &beta1_power_scalar, &beta2_power_scalar, &lr_scalar, &beta1_scalar,
-           &beta2_scalar, &epsilon_scalar, &alpha, &global_step] (int64 start_i, int64 limit_i) {
+           &beta2_scalar, &epsilon_scalar, &alpha, &global_step, 
+           &weight_decay_scalar] (int64 start_i, int64 limit_i) {
         if (inner_dim > 0) {
           auto grad_flat = grad.flat_outer_dims<T>();
           auto indices_vec = indices.vec<Tindex>();
@@ -1285,7 +1293,11 @@ class KvSparseApplyAdamOp : public OpKernel {
               auto g = grad_flat.template chip<0>(i);
               m_a += (g - m_a) * (static_cast<T>(1) - beta1_scalar);
               v_a += (g.square() - v_a) * (static_cast<T>(1) - beta2_scalar);
-              var_i -= (m_a * alpha) / (v_a.sqrt() + epsilon_scalar);
+              if (this->apply_weight_decay_) {
+                var_i -= (m_a * alpha) / (v_a.sqrt() + epsilon_scalar) + weight_decay_scalar * var_i;
+              } else {
+                var_i -= (m_a * alpha) / (v_a.sqrt() + epsilon_scalar);
+              }
               var->Commit(index, value_ptr);
             }
           }
@@ -1300,6 +1312,7 @@ class KvSparseApplyAdamOp : public OpKernel {
 
  private:
   bool use_exclusive_lock_;
+  bool apply_weight_decay_;
 };
 
 #define REGISTER_KERNELS(T, Tindices)                                 \
