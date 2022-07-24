@@ -9,6 +9,3 @@ python script/split_by_user.py
 python script/generate_voc.py
 
 python script/pick2txt.py
-python script/item_map.py
-python script/history_behavior_list.py
-python script/generate_neg.py

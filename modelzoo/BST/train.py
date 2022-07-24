@@ -7,6 +7,7 @@ import math
 import collections
 from tensorflow.python.client import timeline
 import json
+from glob import glob
 
 from tensorflow.python.ops import partitioned_variables
 
@@ -55,6 +56,10 @@ HASH_BUCKET_SIZES = {
     'price': 50
 }
 
+# next_element = iter.next()
+
+# dict("pid":"1 2 3 4 5 ... 1000",)
+
 
 class BST():
     def __init__(self,
@@ -78,9 +83,10 @@ class BST():
         if not inputs:
             raise ValueError("Dataset is not defined.")
         self._feature = inputs[0]
-        self._label = inputs[1]
-
+        self._label = inputs[1]  
+        
         self._unseq_column = user_column + item_column
+
         self._tag_column = tag_column
         self._key_column = key_column
         self._batch_size = batch_size
@@ -101,7 +107,7 @@ class BST():
         self._input_layer_partitioner = input_layer_partitioner
         self._dense_layer_partitioner = dense_layer_partitioner
 
-        self._create_model()
+        self.r = self._create_model()
         with tf.name_scope('head'):
             self._create_loss()
             self._create_optimizer()
@@ -262,6 +268,7 @@ class BST():
                         self._feature,
                         self._unseq_column,
                         cols_to_output_tensors=key_dict)
+                
 
             # bst input
             with tf.variable_scope('bst_input_layer', reuse=tf.AUTO_REUSE):
@@ -298,6 +305,7 @@ class BST():
                                          seq_size=self._max_seqence_length,
                                          head_count=self._multi_head_size,
                                          name='bst')
+        
 
         net = tf.concat([unseq_emb, bst_output], axis=1)
 
@@ -323,8 +331,14 @@ class BST():
             net = tf.cast(net, dtype=tf.float32)
         self._logits = tf.layers.dense(inputs=net, units=1)
 
-        self.probability = tf.math.sigmoid(self._logits)
-        self.output = tf.round(self.probability)
+        self.probability = tf.math.sigmoid(self._logits,name="probability")
+        self.output = tf.round(self.probability,name="output")
+
+        return self.output
+
+     
+
+
 
     # compute loss
     def _create_loss(self):
@@ -380,7 +394,7 @@ def build_model_input(filename, batch_size, num_epochs):
         all_columns.pop(BUY_COLUMN[0])
         features = all_columns
         return features, labels
-
+    
     '''Work Queue Feature'''
     if args.workqueue and not args.tf:
         from tensorflow.python.ops.work_queue import WorkQueue
@@ -493,6 +507,43 @@ def build_feature_columns():
 
     return user_column, item_column, tag_column, key_column
 
+def deldir(dir):
+    if not os.path.exists(dir):
+        return False
+    if os.path.isfile(dir):
+        os.remove(dir)
+        return
+    for i in os.listdir(dir):
+        t = os.path.join(dir, i)
+        if os.path.isdir(t):
+            deldir(t)
+        else:
+            os.unlink(t)
+    os.removedirs(dir)
+
+class MyHook(tf.train.SessionRunHook):
+        def __init__(self,cur_model,export_dir):
+            self.model = cur_model
+            self.dir = export_dir
+        
+        def before_run(self, run_context):
+            """返回SessionRunArgs和session run一起跑"""
+            v1 = tf.get_collection('logis')
+            prob = tf.get_collection('prob')
+            return tf.train.SessionRunArgs(fetches=[v1, prob])
+
+        
+        def end(self,session):
+            if os.path.exists(self.dir):
+                deldir(self.dir)
+                os.mkdir(self.dir)
+            
+            tf.saved_model.simple_save(
+                session,
+                self.dir,
+                inputs = self.model._feature,
+                outputs = {"predict":self.model.output}
+            )
 
 def train(sess_config,
           input_hooks,
@@ -509,7 +560,7 @@ def train(sess_config,
     scaffold = tf.train.Scaffold(
         local_init_op=tf.group(tf.local_variables_initializer(), data_init_op),
         saver=tf.train.Saver(max_to_keep=args.keep_checkpoint_max))
-
+    # save_hook = MyHook(model,"/root/deeprec/DeepRec/modelzoo/BST/result/savedmodels")
     stop_hook = tf.train.StopAtStepHook(last_step=steps)
     log_hook = tf.train.LoggingTensorHook(
         {
@@ -518,6 +569,8 @@ def train(sess_config,
         }, every_n_iter=100)
     hooks.append(stop_hook)
     hooks.append(log_hook)
+    dir = "/home/deeprec/DeepRec/modelzoo/BST/result/savedmodels"
+    # hooks.append(save_hook)
     if args.timeline > 0:
         hooks.append(
             tf.train.ProfilerHook(save_steps=args.timeline,
@@ -545,8 +598,12 @@ def train(sess_config,
             summary_dir=checkpoint_dir,
             save_summaries_steps=args.save_steps,
             config=sess_config) as sess:
+        
         while not sess.should_stop():
             sess.run([model.loss, model.train_op])
+        
+            
+        
     print("Training completed.")
 
 
@@ -575,6 +632,9 @@ def eval(sess_config, input_hooks, model, data_init_op, steps, checkpoint_dir):
                 writer.add_summary(events, _in)
                 print("Evaluation complate:[{}/{}]".format(_in, steps))
                 print("ACC = {}\nAUC = {}".format(eval_acc, eval_auc))
+          
+
+
 
 
 def main(tf_config=None, server=None):
@@ -629,6 +689,8 @@ def main(tf_config=None, server=None):
 
     # create feature column
     user_column, item_column, tag_column, key_column = build_feature_columns()
+    
+    
 
     # create variable partitioner for distributed training
     num_ps_replicas = len(tf_config['ps_hosts']) if tf_config else 0
@@ -682,6 +744,9 @@ def main(tf_config=None, server=None):
     if not (args.no_eval or tf_config):
         eval(sess_config, hooks, model, test_init_op, test_steps,
              checkpoint_dir)
+    
+
+    
 
 
 def boolean_string(string):

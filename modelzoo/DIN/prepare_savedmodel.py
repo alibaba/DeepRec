@@ -23,7 +23,6 @@ import collections
 from tensorflow.python.client import timeline
 import json
 
-
 from tensorflow.python.ops import partitioned_variables
 
 from tensorflow.contrib.rnn.python.ops.core_rnn_cell import _Linear
@@ -37,8 +36,7 @@ print("Using TensorFlow version %s" % (tf.__version__))
 # Definition of some constants
 UNSEQ_COLUMNS = ['UID', 'ITEM', 'CATEGORY']
 HIS_COLUMNS = ['HISTORY_ITEM', 'HISTORY_CATEGORY']
-NEG_COLUMNS = ['NOCLK_HISTORY_ITEM', 'NOCLK_HISTORY_CATEGORY']
-SEQ_COLUMNS = HIS_COLUMNS + NEG_COLUMNS
+SEQ_COLUMNS = HIS_COLUMNS
 LABEL_COLUMN = ['CLICKED']
 TRAIN_DATA_COLUMNS = LABEL_COLUMN + UNSEQ_COLUMNS + SEQ_COLUMNS
 
@@ -48,73 +46,14 @@ ATTENTION_SIZE = 18 * 2
 MAX_SEQ_LENGTH = 50
 
 
-class VecAttGRUCell(tf.nn.rnn_cell.RNNCell):
-    def __init__(self,
-                 num_units,
-                 activation=None,
-                 reuse=None,
-                 kernel_initializer=None,
-                 bias_initializer=None):
-        super(VecAttGRUCell, self).__init__(_reuse=reuse)
-        self._num_units = num_units
-        self._activation = activation or tf.math.tanh
-        self._kernel_initializer = kernel_initializer
-        self._bias_initializer = bias_initializer
-        self._gate_linear = None
-        self._candidate_linear = None
-
-    @property
-    def state_size(self):
-        return self._num_units
-
-    @property
-    def output_size(self):
-        return self._num_units
-
-    def __call__(self, inputs, state):
-        return self.call(inputs, state)
-
-    def call(self, inputs, state, att_score=None):
-        '''Gated recurrent unit (GRU) with nunits cells.'''
-        _inputs = inputs[0]
-        att_score = inputs[1]
-        if self._gate_linear is None:
-            bias_ones = self._bias_initializer
-            if self._bias_initializer is None:
-                bias_ones = tf.constant_initializer(1.0, dtype=_inputs.dtype)
-            with tf.variable_scope('gates'):  # Reset gate and update gate.
-                self._gate_linear = _Linear(
-                    [_inputs, state],
-                    2 * self._num_units,
-                    True,
-                    bias_initializer=bias_ones,
-                    kernel_initializer=self._kernel_initializer)
-
-        value = tf.math.sigmoid(self._gate_linear([_inputs, state]))
-        r, u = tf.split(value=value, num_or_size_splits=2, axis=1)
-
-        r_state = r * state
-        if self._candidate_linear is None:
-            with tf.variable_scope('candidate'):
-                self._candidate_linear = _Linear(
-                    [_inputs, r_state],
-                    self._num_units,
-                    True,
-                    bias_initializer=self._bias_initializer,
-                    kernel_initializer=self._kernel_initializer)
-        c = self._activation(self._candidate_linear([_inputs, r_state]))
-        u = (1.0 - att_score) * u
-        new_h = u * state + (1 - u) * c
-        return new_h, new_h
-
-
-class DIEN():
+class DIN():
     def __init__(self,
                  feature_column=None,
                  learning_rate=0.001,
                  embedding_dim=18,
                  hidden_size=36,
                  attention_size=36,
+                 cur_bs = 1,
                  inputs=None,
                  optimizer_type='adam',
                  bf16=False,
@@ -133,8 +72,7 @@ class DIEN():
             raise ValueError('Dataset is not defined.')
         if not feature_column:
             raise ValueError('Dense column or sparse column is not defined.')
-        self._feature = inputs[0]
-        self._label = inputs[1]
+        self._feature = inputs
 
         self._uid_emb_column = feature_column['uid_emb_column']
         self._item_cate_column = feature_column['item_cate_column']
@@ -142,10 +80,6 @@ class DIEN():
         self._category_cate_column = feature_column['category_cate_column']
         self._his_category_cate_column = feature_column[
             'his_category_cate_column']
-        self._noclk_his_item_cate_column = feature_column[
-            'noclk_his_item_cate_column']
-        self._noclk_his_category_cate_column = feature_column[
-            'noclk_his_category_cate_column']
 
         self.tf = stock_tf
         self.bf16 = False if self.tf else bf16
@@ -158,24 +92,19 @@ class DIEN():
         self._dynamic_ev = dynamic_ev
         self._ev_opt = ev_opt
         self._multihash = multihash
-
+        self.bs = cur_bs
         self._learning_rate = learning_rate
         self._optimizer_type = optimizer_type
         self._input_layer_partitioner = input_layer_partitioner
         self._dense_layer_partitioner = dense_layer_partitioner
 
-        self._batch_size = tf.shape(self._label)[0]
-        # 
         self._embedding_dim = embedding_dim
         self._hidden_size = hidden_size
         self._attention_size = attention_size
         self._data_type = tf.bfloat16 if self.bf16 else tf.float32
 
         self._create_model()
-        with tf.name_scope('head'):
-            self._create_loss()
-            self._create_optimizer()
-            self._create_metrics()
+      
 
     # used to add summary in tensorboard
     def _add_layer_summary(self, value, tag):
@@ -205,52 +134,6 @@ class DIEN():
             pos = tf.nn.relu(x)
             neg = alpha * (x - abs(x)) * tf.constant(0.5, dtype=x.dtype)
             return pos + neg
-
-    def _auxiliary_net(self, in_, stag='auxiliary_net'):
-        bn1 = tf.layers.batch_normalization(inputs=in_,
-                                            name='bn1' + stag,
-                                            reuse=tf.AUTO_REUSE)
-        dnn1 = tf.layers.dense(bn1,
-                               100,
-                               activation=None,
-                               name='f1' + stag,
-                               reuse=tf.AUTO_REUSE)
-        dnn1 = tf.nn.sigmoid(dnn1)
-        dnn2 = tf.layers.dense(dnn1,
-                               50,
-                               activation=None,
-                               name='f2' + stag,
-                               reuse=tf.AUTO_REUSE)
-        dnn2 = tf.nn.sigmoid(dnn2)
-        dnn3 = tf.layers.dense(dnn2,
-                               2,
-                               activation=None,
-                               name='f3' + stag,
-                               reuse=tf.AUTO_REUSE)
-        y_hat = tf.nn.softmax(dnn3) + tf.constant(0.00000001, dtype=dnn3.dtype)
-        return y_hat
-
-    def _auxiliary_loss(self,
-                        h_states,
-                        click_seq,
-                        noclick_seq,
-                        mask,
-                        dtype=tf.float32,
-                        stag=None):
-        mask = tf.cast(mask, dtype=dtype)
-        click_input_ = tf.concat([h_states, click_seq], -1)
-        noclick_input_ = tf.concat([h_states, noclick_seq], -1)
-        with tf.variable_scope('auxiliary_net'):
-            click_prop_ = self._auxiliary_net(click_input_, stag=stag)[:, :, 0]
-            noclick_prop_ = self._auxiliary_net(noclick_input_,
-                                                stag=stag)[:, :, 0]
-
-        click_loss_ = -tf.reshape(tf.log(click_prop_),
-                                  [-1, tf.shape(click_seq)[1]]) * mask
-        noclick_loss_ = -tf.reshape(tf.log(1.0 - noclick_prop_),
-                                    [-1, tf.shape(noclick_seq)[1]]) * mask
-        loss_ = tf.reduce_mean(click_loss_ + noclick_loss_)
-        return loss_
 
     def _attention(self,
                    query,
@@ -371,9 +254,8 @@ class DIEN():
     def _embedding_input_layer(self):
         for key in SEQ_COLUMNS:
             self._feature[key] = tf.strings.split(self._feature[key], '')
-           
             self._feature[key] = tf.sparse.slice(
-                self._feature[key], [0, 0], [self._batch_size, MAX_SEQ_LENGTH])
+                self._feature[key], [0, 0], [self.bs, MAX_SEQ_LENGTH])
 
         # get uid embeddings
         if self._adaptive_emb and not self.tf:
@@ -459,17 +341,7 @@ class DIEN():
                                  2)
         sequence_length = self._assert_all_equal_and_return(sequence_lengths)
 
-        # get negative samples item embedding
-        noclk_his_item_embedding = self._get_embedding_input(
-            builder, self._noclk_his_item_cate_column, item_embedding_var)
-        noclk_his_category_embedding = self._get_embedding_input(
-            builder, self._noclk_his_category_cate_column,
-            category_embedding_var)
-
-        noclk_his_item_emb = tf.concat(
-            [noclk_his_item_embedding, noclk_his_category_embedding], 2)
-
-        return uid_emb, item_emb, his_item_emb, noclk_his_item_emb, sequence_length
+        return uid_emb, item_emb, his_item_emb, sequence_length
 
     # create model
     def _create_model(self):
@@ -477,69 +349,29 @@ class DIEN():
         with tf.variable_scope('input_layer',
                                partitioner=self._input_layer_partitioner,
                                reuse=tf.AUTO_REUSE):
-            uid_emb, item_emb, his_item_emb, noclk_his_item_emb, sequence_length = self._embedding_input_layer(
+            uid_emb, item_emb, his_item_emb, sequence_length = self._embedding_input_layer(
             )
 
             if self.bf16:
                 uid_emb = tf.cast(uid_emb, tf.bfloat16)
                 item_emb = tf.cast(item_emb, tf.bfloat16)
                 his_item_emb = tf.cast(his_item_emb, tf.bfloat16)
-                noclk_his_item_emb = tf.cast(noclk_his_item_emb, tf.bfloat16)
 
             item_his_eb_sum = tf.reduce_sum(his_item_emb, 1)
             mask = tf.sequence_mask(sequence_length)
-
-        # RNN layer_1
-        with tf.variable_scope('rnn_1'):
-            run_output_1, _ = tf.nn.dynamic_rnn(
-                tf.nn.rnn_cell.GRUCell(self._hidden_size),
-                inputs=his_item_emb,
-                sequence_length=sequence_length,
-                dtype=self._data_type,
-                scope='gru1')
-            tf.summary.histogram('GRU_outputs', run_output_1)
-
-        # Aux loss
-        aux_loss_scope = tf.variable_scope(
-            'aux_loss', partitioner=self._dense_layer_partitioner)
-        with aux_loss_scope.keep_weights(dtype=tf.float32) if self.bf16 \
-            else aux_loss_scope:
-            self._aux_loss = self._auxiliary_loss(run_output_1[:, :-1, :],
-                                                  his_item_emb[:, 1:, :],
-                                                  noclk_his_item_emb[:, 1:, :],
-                                                  mask[:, 1:],
-                                                  dtype=self._data_type,
-                                                  stag='gru')
-            if self.bf16:
-                self._aux_loss = tf.cast(self._aux_loss, tf.float32)
 
         # Attention layer
         attention_scope = tf.variable_scope('attention_layer')
         with attention_scope.keep_weights(dtype=tf.float32) if self.bf16 \
             else attention_scope:
-            _, alphas = self._attention(item_emb,
-                                        run_output_1,
-                                        self._attention_size,
-                                        mask,
-                                        softmax_stag=1,
-                                        stag='1_1',
-                                        mode='LIST',
-                                        return_alphas=True)
-            tf.summary.histogram('alpha_outputs', alphas)
-
-        # RNN layer_2
-        with tf.variable_scope('rnn_2'):
-            _, final_state2 = tf.nn.dynamic_rnn(
-                VecAttGRUCell(self._hidden_size),
-                inputs=[run_output_1, tf.expand_dims(alphas, -1)],
-                sequence_length=sequence_length,
-                dtype=self._data_type,
-                scope='gru2')
-            tf.summary.histogram('GRU2_Final_State', final_state2)
+            attention_output = self._attention(item_emb, his_item_emb,
+                                               self._attention_size, mask)
+            att_fea = tf.reduce_sum(attention_output, 1)
+            tf.summary.histogram('alpha_outputs', att_fea)
 
         top_input = tf.concat([
             uid_emb, item_emb, item_his_eb_sum, item_emb * item_his_eb_sum,
-            final_state2
+            att_fea
         ], 1)
 
         # Top MLP layer
@@ -556,98 +388,8 @@ class DIEN():
         self.probability = tf.math.sigmoid(self._logits)
         self.output = tf.round(self.probability)
 
-    # compute loss
-    def _create_loss(self):
-        self._logits = tf.squeeze(self._logits)
-        self._crt_loss = tf.losses.sigmoid_cross_entropy(
-            self._label,
-            self._logits,
-            scope='loss',
-            reduction=tf.losses.Reduction.SUM_OVER_BATCH_SIZE)
-        self.loss = self._crt_loss + self._aux_loss
-        tf.summary.scalar('sigmoid_cross_entropy', self._crt_loss)
-        tf.summary.scalar('aux_loss', self._aux_loss)
-        tf.summary.scalar('loss', self.loss)
+   
 
-    # define optimizer and generate train_op
-    def _create_optimizer(self):
-        self.global_step = tf.train.get_or_create_global_step()
-        if self.tf or self._optimizer_type == 'adam':
-            optimizer = tf.train.AdamOptimizer(
-                learning_rate=self._learning_rate)
-        elif self._optimizer_type == 'adamasync':
-            optimizer = tf.train.AdamAsyncOptimizer(
-                learning_rate=self._learning_rate)
-        elif self._optimizer_type == 'adagraddecay':
-            optimizer = tf.train.AdagradDecayOptimizer(
-                learning_rate=self._learning_rate,
-                global_step=self.global_step)
-        else:
-            raise ValueError("Optimzier type error.")
-
-        gradients = optimizer.compute_gradients(self.loss)
-        clipped_gradients = [(tf.clip_by_norm(grad, 5), var)
-                             for grad, var in gradients if grad is not None]
-
-        self.train_op = optimizer.apply_gradients(clipped_gradients,
-                                                  global_step=self.global_step)
-
-    # compute acc & auc
-    def _create_metrics(self):
-        self.acc, self.acc_op = tf.metrics.accuracy(labels=self._label,
-                                                    predictions=self.output)
-        self.auc, self.auc_op = tf.metrics.auc(labels=self._label,
-                                               predictions=self.probability,
-                                               num_thresholds=1000)
-        tf.summary.scalar('eval_acc', self.acc)
-        tf.summary.scalar('eval_auc', self.auc)
-
-
-# generate dataset pipline
-def build_model_input(filename, batch_size, num_epochs):
-    def parse_csv(value, neg_value):
-        tf.logging.info('Parsing {}'.format(filename))
-        cate_defaults = [[' '] for i in range(0, 5)]
-        label_defaults = [[0]]
-        column_headers = TRAIN_DATA_COLUMNS
-        record_defaults = label_defaults + cate_defaults
-        columns = tf.io.decode_csv(value,
-                                   record_defaults=record_defaults,
-                                   field_delim='\t')
-        neg_columns = tf.io.decode_csv(neg_value,
-                                       record_defaults=[[''], ['']],
-                                       field_delim='\t')
-        columns.extend(neg_columns)
-        all_columns = collections.OrderedDict(zip(column_headers, columns))
-
-        labels = all_columns.pop(LABEL_COLUMN[0])
-        features = all_columns
-        return features, labels
-
-    '''Work Queue Feature'''
-    if args.workqueue and not args.tf:
-        from tensorflow.python.ops.work_queue import WorkQueue
-        work_queue = WorkQueue([filename])
-        neg_work_queue = WorkQueue([filename + '_neg'])
-        # For multiple files：
-        # work_queue = WorkQueue([filename, filename1,filename2,filename3])
-        files = work_queue.input_dataset()
-        neg_files = neg_work_queue.input_dataset()
-    else:
-        files = filename
-        neg_files = filename + '_neg'
-    # Extract lines from input files using the Dataset API.
-    dataset = tf.data.TextLineDataset(files)
-    dataset_neg_samples = tf.data.TextLineDataset(neg_files)
-    dataset = tf.data.Dataset.zip((dataset, dataset_neg_samples))
-    dataset = dataset.shuffle(buffer_size=20000,
-                              seed=args.seed)  # set seed for reproducing
-    dataset = dataset.repeat(num_epochs)
-    dataset = dataset.batch(batch_size)
-    dataset = dataset.map(parse_csv,
-                          num_parallel_calls=tf.data.experimental.AUTOTUNE)
-    dataset = dataset.prefetch(2)
-    return dataset
 
 
 # generate feature columns
@@ -728,160 +470,27 @@ def build_feature_columns(data_location=None):
     his_category_cate_column = tf.feature_column.sequence_categorical_column_with_vocabulary_file(
         'HISTORY_CATEGORY', cat_file, default_value=0)
 
-    # negative samples
-    noclk_his_item_cate_column = tf.feature_column.sequence_categorical_column_with_vocabulary_file(
-        'NOCLK_HISTORY_ITEM', mid_file, default_value=0)
-    noclk_his_category_cate_column = tf.feature_column.sequence_categorical_column_with_vocabulary_file(
-        'NOCLK_HISTORY_CATEGORY', cat_file, default_value=0)
-
     return {
         'uid_emb_column': uid_emb_column,
         'item_cate_column': item_cate_column,
         'category_cate_column': category_cate_column,
         'his_item_cate_column': his_item_cate_column,
-        'his_category_cate_column': his_category_cate_column,
-        'noclk_his_item_cate_column': noclk_his_item_cate_column,
-        'noclk_his_category_cate_column': noclk_his_category_cate_column
+        'his_category_cate_column': his_category_cate_column
     }, ev_opt
 
 
-def train(sess_config,
-          input_hooks,
-          model,
-          data_init_op,
-          steps,
-          checkpoint_dir,
-          tf_config=None,
-          server=None):
-    model.is_training = True
-    hooks = []
-    hooks.extend(input_hooks)
-
-    scaffold = tf.train.Scaffold(
-        local_init_op=tf.group(tf.tables_initializer(),
-                               tf.local_variables_initializer(), data_init_op),
-        saver=tf.train.Saver(max_to_keep=args.keep_checkpoint_max))
-
-    stop_hook = tf.train.StopAtStepHook(last_step=steps)
-    log_hook = tf.train.LoggingTensorHook(
-        {
-            'steps': model.global_step,
-            'loss': model.loss
-        }, every_n_iter=100)
-    hooks.append(stop_hook)
-    hooks.append(log_hook)
-    if args.timeline > 0:
-        hooks.append(
-            tf.train.ProfilerHook(save_steps=args.timeline,
-                                  output_dir=checkpoint_dir))
-    save_steps = args.save_steps if args.save_steps or args.no_eval else steps
-    '''
-                            Incremental_Checkpoint
-    Please add `save_incremental_checkpoint_secs` in 'tf.train.MonitoredTrainingSession'
-    it's default to None, Incremental_save checkpoint time in seconds can be set 
-    to use incremental checkpoint function, like `tf.train.MonitoredTrainingSession(
-        save_incremental_checkpoint_secs=args.incremental_ckpt)`
-    '''
-    if args.incremental_ckpt and not args.tf:
-        print("Incremental_Checkpoint is not really enabled.")
-        print("Please see the comments in the code.")
-        sys.exit()
-
-    with tf.train.MonitoredTrainingSession(
-            master=server.target if server else '',
-            is_chief=tf_config['is_chief'] if tf_config else True,
-            hooks=hooks,
-            scaffold=scaffold,
-            checkpoint_dir=checkpoint_dir,
-            save_checkpoint_steps=save_steps,
-            summary_dir=checkpoint_dir,
-            save_summaries_steps=args.save_steps,
-            config=sess_config) as sess:
-        while not sess.should_stop():
-            sess.run([model.loss, model.train_op])
-    print("Training completed.")
-
-
-def eval(sess_config, input_hooks, model, data_init_op, steps, checkpoint_dir):
-    model.is_training = False
-    hooks = []
-    hooks.extend(input_hooks)
-
-    scaffold = tf.train.Scaffold(
-        local_init_op=tf.group(tf.tables_initializer(),
-                               tf.local_variables_initializer(), data_init_op))
-    session_creator = tf.train.ChiefSessionCreator(
-        scaffold=scaffold, checkpoint_dir=checkpoint_dir, config=sess_config)
-    writer = tf.summary.FileWriter(os.path.join(checkpoint_dir, 'eval'))
-    merged = tf.summary.merge_all()
-
-    with tf.train.MonitoredSession(session_creator=session_creator,
-                                   hooks=hooks) as sess:
-        for _in in range(1, steps + 1):
-            if (_in != steps):
-                sess.run([model.acc_op, model.auc_op])
-                if (_in % 100 == 0):
-                    print("Evaluation complate:[{}/{}]".format(_in, steps))
-            else:
-                eval_acc, eval_auc, events = sess.run(
-                    [model.acc_op, model.auc_op, merged])
-                writer.add_summary(events, _in)
-                print("Evaluation complate:[{}/{}]".format(_in, steps))
-                print("ACC = {}\nAUC = {}".format(eval_acc, eval_auc))
-
-
 def main(tf_config=None, server=None):
-    # check dataset and count data set size
-    print("Checking dataset...")
-    train_file = args.data_location + '/local_train_splitByUser'
-    test_file = args.data_location + '/local_test_splitByUser'
-    if (not os.path.exists(train_file)) or (not os.path.exists(test_file)) or (
-            not os.path.exists(train_file + '_neg')) or (
-                not os.path.exists(test_file + '_neg')):
-        print("Dataset does not exist in the given data_location.")
-        sys.exit()
-    no_of_training_examples = sum(1 for line in open(train_file))
-    no_of_test_examples = sum(1 for line in open(test_file))
-    print("Numbers of training dataset is {}".format(no_of_training_examples))
-    print("Numbers of test dataset is {}".format(no_of_test_examples))
-
+   
     # set batch size, eporch & steps
     batch_size = math.ceil(
         args.batch_size / args.micro_batch
     ) if args.micro_batch and not args.tf else args.batch_size
 
-    if args.steps == 0:
-        no_of_epochs = 1
-        train_steps = math.ceil(
-            (float(no_of_epochs) * no_of_training_examples) / batch_size)
-    else:
-        no_of_epochs = math.ceil(
-            (float(batch_size) * args.steps) / no_of_training_examples)
-        train_steps = args.steps
-    test_steps = math.ceil(float(no_of_test_examples) / batch_size)
-    print("The training steps is {}".format(train_steps))
-    print("The testing steps is {}".format(test_steps))
-
+   
     # set fixed random seed
     tf.set_random_seed(args.seed)
 
-    # set directory path for checkpoint_dir
-    model_dir = os.path.join(args.output_dir,
-                             'model_DIEN_' + str(int(time.time())))
-    checkpoint_dir = args.checkpoint if args.checkpoint else model_dir
-    print("Saving model checkpoints to " + checkpoint_dir)
-
-    # create data pipline of train & test dataset
-    train_dataset = build_model_input(train_file, batch_size, no_of_epochs)
-    test_dataset = build_model_input(test_file, batch_size, 1)
-
-    iterator = tf.data.Iterator.from_structure(train_dataset.output_types,
-                                               test_dataset.output_shapes)
-    next_element = iterator.get_next()
-
-    train_init_op = iterator.make_initializer(train_dataset)
-    test_init_op = iterator.make_initializer(test_dataset)
-
+    
     # create feature column
     feature_column, ev_opt = build_feature_columns(args.data_location)
 
@@ -901,48 +510,60 @@ def main(tf_config=None, server=None):
     sess_config.inter_op_parallelism_threads = args.inter
     sess_config.intra_op_parallelism_threads = args.intra
 
-    # Session hooks
-    hooks = []
-
-    if args.smartstaged and not args.tf:
-        '''Smart staged Feature'''
-        next_element = tf.staged(next_element, num_threads=4, capacity=40)
-        sess_config.graph_options.optimizer_options.do_smart_stage = True
-        hooks.append(tf.make_prefetch_hook())
-    if args.op_fusion and not args.tf:
-        '''Auto Graph Fusion'''
-        sess_config.graph_options.optimizer_options.do_op_fusion = True
-    if args.micro_batch and not args.tf:
-        '''Auto Mirco Batch'''
-        sess_config.graph_options.optimizer_options.micro_batch_num = args.micro_batch
+    
+    final_input = {}
+    all_fea = UNSEQ_COLUMNS + SEQ_COLUMNS
+    for col in all_fea:
+        final_input[col] =  tf.placeholder(tf.string,[None], name=col)
 
     # create model
-    model = DIEN(feature_column=feature_column,
-                 learning_rate=args.learning_rate,
-                 embedding_dim=EMBEDDING_DIM,
-                 hidden_size=HIDDEN_SIZE,
-                 attention_size=ATTENTION_SIZE,
-                 optimizer_type=args.optimizer,
-                 bf16=args.bf16,
-                 stock_tf=args.tf,
-                 emb_fusion=args.emb_fusion,
-                 ev=args.ev,
-                 ev_elimination=args.ev_elimination,
-                 ev_filter=args.ev_filter,
-                 adaptive_emb=args.adaptive_emb,
-                 dynamic_ev=args.dynamic_ev,
-                 ev_opt=ev_opt,
-                 inputs=next_element,
-                 multihash=args.multihash,
-                 input_layer_partitioner=input_layer_partitioner,
-                 dense_layer_partitioner=dense_layer_partitioner)
+    model = DIN(feature_column=feature_column,
+                learning_rate=args.learning_rate,
+                embedding_dim=EMBEDDING_DIM,
+                hidden_size=HIDDEN_SIZE,
+                attention_size=ATTENTION_SIZE,
+                optimizer_type=args.optimizer,
+                bf16=args.bf16,
+                stock_tf=args.tf,
+                emb_fusion=args.emb_fusion,
+                ev=args.ev,
+                ev_elimination=args.ev_elimination,
+                ev_filter=args.ev_filter,
+                adaptive_emb=args.adaptive_emb,
+                dynamic_ev=args.dynamic_ev,
+                ev_opt=ev_opt,
+                cur_bs = batch_size,
+                inputs=final_input,
+                multihash=args.multihash,
+                input_layer_partitioner=input_layer_partitioner,
+                dense_layer_partitioner=dense_layer_partitioner)
 
-    # Run model training and evaluation
-    train(sess_config, hooks, model, train_init_op, train_steps,
-          checkpoint_dir, tf_config, server)
-    if not (args.no_eval or tf_config):
-        eval(sess_config, hooks, model, test_init_op, test_steps,
-             checkpoint_dir)
+
+    with tf.Session() as sess1:
+        
+        # Initialize saver
+        folder_dir = args.checkpoint
+        saver = tf.train.Saver()
+
+        # Restore from checkpoint
+        saver.restore(sess1,tf.train.latest_checkpoint(folder_dir))
+        
+        # Get save directory
+        dir = "./savedmodels"
+        os.makedirs(dir,exist_ok=True)
+        cc_time = int(time.time())
+        saved_path = os.path.join(dir,str(cc_time))
+        os.mkdir(saved_path)
+        
+        
+        tf.saved_model.simple_save(
+            sess1,
+            saved_path,
+            inputs = model._feature,
+            outputs = {"predict":model.output}
+        )
+
+   
 
 
 def boolean_string(string):

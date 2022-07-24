@@ -415,6 +415,9 @@ def main(tf_config=None, server=None):
 
     if tf_config:
         print('train steps : %d' % train_steps)
+        print("-----------")
+        print("-----------")
+
         hooks.append(tf.train.StopAtStepHook(last_step=train_steps))
         hooks.append(
             tf.train.LoggingTensorHook(
