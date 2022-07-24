@@ -96,7 +96,7 @@ def build_feature_cols():
                 tf.feature_column.embedding_column(categorical_column,
                                                    dimension=16,
                                                    combiner='mean',
-                                                   do_fusion=True))
+                                                   do_fusion='v2'))
         else:
             column = tf.feature_column.numeric_column(column_name, shape=(1, ))
             dense_column.append(column)
@@ -288,7 +288,7 @@ class DLRM():
         tf.summary.scalar('loss', loss)
 
         self.global_step = tf.train.get_or_create_global_step()
-        optimizer = tf.train.GradientDescentOptimizer(
+        optimizer = tf.train.AdamOptimizer(
             learning_rate=self.learning_rate)
 
         train_op = optimizer.minimize(loss, global_step=self.global_step)

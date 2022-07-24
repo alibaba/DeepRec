@@ -290,7 +290,7 @@ class _TPUEmbeddingColumnV2(_TPUBaseEmbeddingColumn, fc_lib.EmbeddingColumn):
         max_norm=None,
         trainable=True,
         coalesced_scope=None,
-        do_fusion=False)
+        do_fusion=None)
 
   def __init__(self,
                categorical_column,

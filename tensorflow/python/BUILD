@@ -2086,7 +2086,8 @@ tf_gen_op_wrapper_private_py(
 
 py_library(
     name = "fused_embedding_ops",
-    srcs = ["ops/fused_embedding_ops.py"],
+    srcs = ["ops/fused_embedding_ops.py",
+            "ops/fused_embedding_ops_v2.py"],
     srcs_version = "PY2AND3",
     deps = [
         ":fused_embedding_ops_gen",

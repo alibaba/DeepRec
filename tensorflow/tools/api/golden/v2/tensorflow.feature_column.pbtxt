@@ -62,7 +62,7 @@ tf_module {
   }
   member_method {
     name: "embedding_column"
-    argspec: "args=[\'categorical_column\', \'dimension\', \'combiner\', \'initializer\', \'ckpt_to_load_from\', \'tensor_name_in_ckpt\', \'max_norm\', \'trainable\', \'coalesced_scope\', \'do_fusion\'], varargs=None, keywords=None, defaults=[\'mean\', \'None\', \'None\', \'None\', \'None\', \'True\', \'None\', \'False\'], "
+    argspec: "args=[\'categorical_column\', \'dimension\', \'combiner\', \'initializer\', \'ckpt_to_load_from\', \'tensor_name_in_ckpt\', \'max_norm\', \'trainable\', \'coalesced_scope\', \'do_fusion\'], varargs=None, keywords=None, defaults=[\'mean\', \'None\', \'None\', \'None\', \'None\', \'True\', \'None\', \'None\'], "
   }
   member_method {
     name: "hash_table_column"

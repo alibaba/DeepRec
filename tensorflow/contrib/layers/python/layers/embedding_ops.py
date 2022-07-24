@@ -39,6 +39,7 @@ from tensorflow.python.ops import sparse_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.ops import fused_embedding_ops
+from tensorflow.python.ops import fused_embedding_ops_v2
 
 __all__ = [
     "safe_embedding_lookup_sparse", "scattered_embedding_lookup",
@@ -196,11 +197,12 @@ def fused_safe_embedding_lookup_sparse(embedding_weights,
                                        name=None,
                                        partition_strategy="div",
                                        max_norm=None,
-                                       blocknums=None):
+                                       blocknums=None,
+                                       fusion_version='v2'):
   """Functionally the same as safe_embedding_lookup_sparse but using fused embedding
   lookup ops in this method.
   """
-  logging.info("Is using fused embedding lookup for this scope {}".format(name))
+  logging.info("Is using fused embedding lookup {} for this scope {}".format(fusion_version, name))
 
   if combiner is None:
     logging.warn("The default value of combiner will change from \"mean\" "
@@ -239,18 +241,33 @@ def fused_safe_embedding_lookup_sparse(embedding_weights,
         array_ops.gather(original_shape, original_rank - 1)
     ])
 
-    result = fused_embedding_ops.fused_embedding_lookup_sparse(
-      embedding_weights,
-      sparse_ids,
-      sparse_weights=sparse_weights,
-      partition_strategy=partition_strategy,
-      name=name,
-      combiner=combiner,
-      max_norm=max_norm,
-      default_id=default_id,
-      prune_invalid_ids=True,
-      blocknums=blocknums
-    )
+    assert(fusion_version in ['v1', 'v2'])
+    if fusion_version == 'v1':
+      result = fused_embedding_ops.fused_embedding_lookup_sparse(
+        embedding_weights,
+        sparse_ids,
+        sparse_weights=sparse_weights,
+        partition_strategy=partition_strategy,
+        name=None if default_id is None else scope,
+        combiner=combiner,
+        max_norm=max_norm,
+        default_id=default_id,
+        prune_invalid_ids=True,
+        blocknums=blocknums
+      )
+    else:
+      result = fused_embedding_ops_v2.fused_embedding_lookup_sparse_v2(
+        embedding_weights,
+        sparse_ids,
+        sparse_weights=sparse_weights,
+        partition_strategy=partition_strategy,
+        name=None if default_id is None else scope,
+        combiner=combiner,
+        max_norm=max_norm,
+        default_id=default_id,
+        prune=True,
+        blocknums=blocknums
+      )
 
     # Reshape back from linear ids back into higher-dimensional dense result.
     final_result = array_ops.reshape(

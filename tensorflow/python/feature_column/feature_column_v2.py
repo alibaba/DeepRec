@@ -857,7 +857,7 @@ def embedding_column(categorical_column,
                      max_norm=None,
                      trainable=True,
                      coalesced_scope=None,
-                     do_fusion=False):
+                     do_fusion=None):
   """`DenseColumn` that converts from sparse, categorical input.
 
   Use this when your inputs are sparse, but you want to convert them to a dense
@@ -4182,7 +4182,7 @@ class EmbeddingColumn(
       max_norm,
       trainable,
       coalesced_scope=None,
-      do_fusion=False):
+      do_fusion=None):
     """Create feature column in compatible way."""
     return super(EmbeddingColumn, cls).__new__(
         cls, categorical_column, dimension, combiner, initializer,
@@ -4277,7 +4277,8 @@ class EmbeddingColumn(
             sparse_weights=sparse_weights,
             combiner=self.combiner,
             name='%s_weights' % self.name,
-            max_norm=self.max_norm)
+            max_norm=self.max_norm,
+            fusion_version=self.do_fusion)
     else:
       return embedding_ops.safe_embedding_lookup_sparse(
           embedding_weights=embedding_weights,

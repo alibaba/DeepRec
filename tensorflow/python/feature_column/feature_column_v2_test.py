@@ -8481,7 +8481,7 @@ class EmbeddingColumnTest(test.TestCase):
         'tensor_name_in_ckpt': None,
         'trainable': True,
         'coalesced_scope': None,
-        'do_fusion': False,
+        'do_fusion': None,
     }, config)
 
     custom_objects = {'TruncatedNormal': init_ops.TruncatedNormal}
@@ -8536,7 +8536,7 @@ class EmbeddingColumnTest(test.TestCase):
         'tensor_name_in_ckpt': None,
         'trainable': True,
         'coalesced_scope': None,
-        'do_fusion': False,
+        'do_fusion': None,
     }, config)
 
     custom_objects = {

@@ -1951,12 +1951,13 @@ tf_cuda_cc_test(
 )
 
 tf_cuda_cc_test(
-    name = "fused_embedding_ops_test",
+    name = "fused_embedding_ops_gpu_test",
     size = "small",
-    srcs = ["fused_embedding/fused_embedding_local_ops_test.cc",
-            "fused_embedding/fused_embedding_pre_ops_test.cc",
-            "fused_embedding/fused_embedding_post_ops_test.cc",
-            "fused_embedding/fused_embedding_post_grad_ops_test.cc"],
+    srcs = ["fused_embedding/gpu/tests/prune_invalid_and_fill_empty_rows_ops_test.cc",
+            "fused_embedding/gpu/tests/unique_with_count_v3_ops_test.cc",
+            "fused_embedding/gpu/tests/partition_with_permutation_ops_test.cc",
+            "fused_embedding/gpu/tests/fused_embedding_post_v2_ops_test.cc",
+            "fused_embedding/gpu/tests/fused_embedding_post_v2_grad_ops_test.cc"],
     tags = tf_cuda_tests_tags(),
     deps = [
         ":fused_embedding_ops",
@@ -1965,10 +1966,8 @@ tf_cuda_cc_test(
         "//tensorflow/cc:cc_ops",
         "//tensorflow/core:core_cpu",
         "//tensorflow/core:framework",
-        "//tensorflow/core:framework_internal",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
-        "//tensorflow/core:tensorflow",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
@@ -5319,8 +5318,11 @@ tf_kernel_library(
 )
 
 tf_cuda_library(
-    name = "fused_embedding_common_cuh",
-    hdrs = ["fused_embedding/fused_embedding_common.cu.h"],
+    name = "fused_embedding_cuh",
+    hdrs = ["fused_embedding/gpu/common.cu.h",
+            "fused_embedding/gpu/functions/hash_functions.cu.h",
+            "fused_embedding/gpu/functions/kernels.cu.h",
+            "fused_embedding/gpu/functions/partition_select.cu.h"],
 )
 
 tf_kernel_library(
@@ -5332,12 +5334,18 @@ tf_kernel_library(
     ],
     hdrs = ["fused_embedding/embedding_lookup_sparse_op.h"],
     gpu_srcs = [
-        "fused_embedding/fused_embedding_local_ops_gpu.cu.cc",
-        "fused_embedding/fused_embedding_pre_ops_gpus.cu.cc",
-        "fused_embedding/fused_embedding_post_ops_gpus.cu.cc"
+        "fused_embedding/gpu/fused_embedding_post_v2_ops_gpus.cu.cc",
+        "fused_embedding/gpu/partition_with_permutation_ops.cu.cc",
+        "fused_embedding/gpu/prune_invalid_and_fill_empty_rows_ops.cu.cc",
+        "fused_embedding/gpu/unique_with_count_v3_ops.cu.cc",
+        "fused_embedding/gpu/functions/kernels.cu.cc",
+        "fused_embedding/gpu/functions/partition_select.cu.cc",
     ],
-    deps = ["//third_party/eigen3"] + DYNAMIC_DEPS + mkl_deps() +
-           if_cuda(["@cub_archive//:cub", ":fused_embedding_common_cuh"]),
+    deps = ["//third_party/eigen3",
+            "//tensorflow/core/profiler:nvtx_utils"] +
+            DYNAMIC_DEPS + mkl_deps() +
+            if_cuda(["@cub_archive//:cub",
+                     "fused_embedding_cuh"]),
 )
 
 tf_cc_test(

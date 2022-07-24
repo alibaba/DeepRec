@@ -8,15 +8,21 @@ The only difference is that this model use GPU Fused Embedding to acclerate the 
 deep_columns.append(tf.feature_column.embedding_column(
     categorical_column,
     dimension=EMBEDDING_DIMENSIONS[column_name],
-    combiner='mean', do_fusion=True))
+    combiner='mean', do_fusion='v2'))
 ```
 
 ## Benchmark
 
 On A100-80GB-PCIE GPU, with 8 cores AMD EPYC 7232P CPU @ 3.20GHz. Average of 5000 iterations. The perf boost:
 
-|         | Avg Time per Iteration |
-| ------- | ---------------------- |
-| Unfused | 36.38 ms               |
-| Fused   | 34.52 ms               |
-| SpeedUp | 1.05x                  |
+Let tensorflow use private single thread for GPU kernels:
+
+```bash
+export TF_GPU_THREAD_MODE="gpu_private"
+export TF_GPU_THREAD_COUNT=1
+```
+
+|                              | Unfused | Fused   | Speedup |
+| ---------------------------- | ------- |
+| Step Time, Batch Size = 512  | 41.3ms | 38.4ms | 1.07x   |
+| Step Time, Batch Size = 4096 | 75.1ms | 66.5ms | 1.12x   |

@@ -221,7 +221,7 @@ class _DeepEmbeddingLookupArguments(
     if 'ev_option' not in kwargs:
       kwargs['ev_option'] = variables.EmbeddingVariableOption()
     if 'do_fusion' not in kwargs:
-      kwargs['do_fusion'] = False
+      kwargs['do_fusion'] = None
     return super(_DeepEmbeddingLookupArguments, cls).__new__(
         cls, *args, **kwargs)
 
@@ -1189,7 +1189,7 @@ class _EmbeddingColumn(
               shared_vocab_size=None,
               max_norm=None,
               trainable=True,
-              do_fusion=False):
+              do_fusion=None):
     if initializer is not None and not callable(initializer):
       raise ValueError("initializer must be callable if specified. "
                        "Embedding of column_name: {}".format(
@@ -1333,7 +1333,7 @@ def _embeddings_from_arguments(column,
   # This option is only enabled for scattered_embedding_column.
   if args.hash_key:
     if args.do_fusion:
-      raise ValueError("Both do_fusion and hash_key is set. Not support yet.")
+      raise ValueError("Both do_fusion and hash_key is set. Embedding fusion not support hash_key yet.")
 
     embeddings = contrib_variables.model_variable(
         name="weights",
@@ -1439,8 +1439,9 @@ def _embeddings_from_arguments(column,
       input_tensor,
       sparse_weights=weight_tensor,
       combiner=args.combiner,
-      name=column.name + "weights",
-      max_norm=args.max_norm
+      name=column.name + "_weights",
+      max_norm=args.max_norm,
+      fusion_version=args.do_fusion
     )
   else:
     return embedding_ops.safe_embedding_lookup_sparse(
@@ -1483,7 +1484,7 @@ def embedding_column(sparse_id_column,
                      tensor_name_in_ckpt=None,
                      max_norm=None,
                      trainable=True,
-                     do_fusion=False):
+                     do_fusion=None):
   """Creates an `_EmbeddingColumn` for feeding sparse data into a DNN.
 
   Args:

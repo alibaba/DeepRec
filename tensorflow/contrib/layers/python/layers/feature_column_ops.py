@@ -132,9 +132,6 @@ def _input_from_feature_columns(columns_to_tensors,
           arguments = column._deep_embedding_lookup_arguments(
               transformed_tensor)
           if isinstance(column, fc._DynamicDimensionEmbeddingColumn):
-            if arguments.do_fusion:
-              raise ValueError("do_fusion is set but feature column is a _DynamicDimensionEmbeddingColumn."
-                               "Not support yet.")
 
             output = fc._dynamic_dimension_embeddings_from_arguments(  # pylint: disable=protected-access
                   column,

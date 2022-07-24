@@ -3,3 +3,4 @@
 record.py
 *.sh
 *.nsys-rep
+*.gz
