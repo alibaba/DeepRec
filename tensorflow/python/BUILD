@@ -6628,6 +6628,7 @@ py_test(
         ":embedding_ops",
         ":state_ops",
         "//tensorflow/contrib/layers:layers_py",
+        "//tensorflow/contrib/feature_column:feature_column_py",
         "//third_party/py/numpy",
     ],
 )

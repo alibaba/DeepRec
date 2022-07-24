@@ -106,7 +106,7 @@ W = tf.feature_column.embedding_column(categorical_column=columns,
             initializer=tf.ones_initializer(tf.dtypes.float32))
 
 ids={}
-ids["col_emb"] = tf.SparseTensor(indices=[[0,0],[1,1],[2,2],[3,3],[4,4]], values=tf.cast([1,2,3,4,5], tf.dtypes.int64), dense_shape=[5, 4])
+ids["col_emb"] = tf.SparseTensor(indices=[[0,0],[1,1],[2,2],[3,3],[4,4]], values=tf.cast([1,2,3,4,5], tf.dtypes.int64), dense_shape=[5, 5])
 
 emb = tf.feature_column.input_layer(ids, [W])
 fun = tf.multiply(emb, 2.0, name='multiply')
@@ -137,9 +137,73 @@ W = feature_column.embedding_column(sparse_id_column=columns,
             initializer=tf.ones_initializer(tf.dtypes.float32))
 
 ids={}
-ids["col_emb"] = tf.SparseTensor(indices=[[0,0],[1,1],[2,2],[3,3],[4,4]], values=tf.cast([1,2,3,4,5], tf.dtypes.int64), dense_shape=[5, 4])
+ids["col_emb"] = tf.SparseTensor(indices=[[0,0],[1,1],[2,2],[3,3],[4,4]], values=tf.cast([1,2,3,4,5], tf.dtypes.int64), dense_shape=[5, 5])
 
 emb = feature_column_ops.input_from_feature_columns(columns_to_tensors=ids, feature_columns=[W])
+fun = tf.multiply(emb, 2.0, name='multiply')
+loss = tf.reduce_sum(fun, name='reduce_sum')
+opt = tf.train.FtrlOptimizer(0.1, l1_regularization_strength=2.0, l2_regularization_strength=0.00001)
+g_v = opt.compute_gradients(loss)
+train_op = opt.apply_gradients(g_v)
+init = tf.global_variables_initializer()
+
+with tf.Session() as sess:
+    sess.run(init)
+    print("init global done")
+    print(sess.run([emb, train_op,loss]))
+    print(sess.run([emb, train_op,loss]))
+    print(sess.run([emb, train_op,loss]))
+```
+使用`sequence_categorical_column_with_embedding`接口：
+```python
+import tensorflow as tf
+from tensorflow.python.feature_column import sequence_feature_column
+
+
+columns = sequence_feature_column.sequence_categorical_column_with_embedding(key="col_emb", dtype=tf.dtypes.int32)
+W = tf.feature_column.embedding_column(categorical_column=columns,
+            dimension=3,
+            initializer=tf.ones_initializer(tf.dtypes.float32))
+
+ids={}
+ids["col_emb"] = tf.SparseTensor(indices=[[0,0],[0,1],[1,1],[2,2],[3,3],[4,4]], \
+                                 values=tf.cast([1,3,2,3,4,5], tf.dtypes.int64), 
+                                 dense_shape=[5, 5])
+
+# 目前还不支持使用SequenceFeatures接口创建
+emb, length = tf.contrib.feature_column.sequence_input_layer(ids, [W])
+fun = tf.multiply(emb, 2.0, name='multiply')
+loss = tf.reduce_sum(fun, name='reduce_sum')
+opt = tf.train.FtrlOptimizer(0.1, l1_regularization_strength=2.0, l2_regularization_strength=0.00001)
+g_v = opt.compute_gradients(loss)
+train_op = opt.apply_gradients(g_v)
+init = tf.global_variables_initializer()
+
+with tf.Session() as sess:
+    sess.run(init)
+    print("init global done")
+    print(sess.run([emb, train_op,loss]))
+    print(sess.run([emb, train_op,loss]))
+    print(sess.run([emb, train_op,loss]))
+```
+使用`weighted_categorical_column`接口：
+```python
+import tensorflow as tf
+
+
+categorical_column = tf.feature_column.categorical_column_with_embedding("col_emb", dtype=tf.dtypes.int64)
+
+ids={}
+ids["col_emb"] = tf.SparseTensor(indices=[[0,0],[0,1],[1,1],[2,2],[3,3],[4,3],[4,4]], \
+                        values=tf.cast([1,3,2,3,4,5,3], tf.dtypes.int64), dense_shape=[5, 5])    
+ids['weight'] = [[2.0],[5.0],[4.0],[8.0],[3.0],[1.0],[2.5]]
+
+columns = tf.feature_column.weighted_categorical_column(categorical_column, 'weight')
+
+W = tf.feature_column.embedding_column(categorical_column=columns,
+            dimension=3,
+            initializer=tf.ones_initializer(tf.dtypes.float32))
+emb = tf.feature_column.input_layer(ids, [W])
 fun = tf.multiply(emb, 2.0, name='multiply')
 loss = tf.reduce_sum(fun, name='reduce_sum')
 opt = tf.train.FtrlOptimizer(0.1, l1_regularization_strength=2.0, l2_regularization_strength=0.00001)

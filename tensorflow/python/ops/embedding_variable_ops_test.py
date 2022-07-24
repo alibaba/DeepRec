@@ -46,6 +46,8 @@ from tensorflow.python.ops import variables
 from tensorflow.contrib.layers.python.layers import embedding_ops as emb_ops
 from tensorflow.contrib.layers.python.layers import feature_column_ops
 from tensorflow.contrib.layers.python.layers import feature_column
+from tensorflow.python.feature_column import feature_column as feature_column_v1
+from tensorflow.python.feature_column import feature_column_v2
 from tensorflow.python.training import checkpoint_utils
 from tensorflow.python.saved_model import builder as saved_model_builder
 from tensorflow.python.saved_model import loader
@@ -564,7 +566,7 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
             initializer=init_ops.ones_initializer(dtypes.float32))
 
     ids={}
-    ids["col_emb"] = sparse_tensor.SparseTensor(indices=[[0,0],[1,1],[2,2],[3,3],[4,4]], values=math_ops.cast([1,2,3,4,5], dtypes.int64), dense_shape=[5, 4])
+    ids["col_emb"] = sparse_tensor.SparseTensor(indices=[[0,0],[1,1],[2,2],[3,3],[4,4]], values=math_ops.cast([1,2,3,4,5], dtypes.int64), dense_shape=[5, 5])
 
     emb = feature_column_ops.input_from_feature_columns(columns_to_tensors=ids, feature_columns=[W])
 
@@ -1027,6 +1029,96 @@ class EmbeddingVariableTest(test_util.TensorFlowTestCase):
       emb2 = runTestAdagradDecay(self, var)
 
       for i in range(0, 6):
+        for j in range(0, 3):
+          self.assertEqual(emb1.tolist()[i][j], emb2.tolist()[i][j])
+
+  def testEmbeddingVariableWeightedCategoricalColumn(self):
+    print("testEmbeddingVariableWeightedCategoricalColumn")
+    with ops.device('/cpu:0'):
+      def runTestColumn(W):
+        ids={}
+        ids["col_emb"] = sparse_tensor.SparseTensor(indices=[[0,0],[0,1],[1,1],[2,2],[3,3],[4,3],[4,4]], \
+                            values=math_ops.cast([1,3,2,3,4,5,3], dtypes.int64), dense_shape=[5, 5])    
+        ids['weight'] = [[2.0],[5.0],[4.0],[8.0],[3.0],[1.0],[2.5]]
+
+        emb = feature_column_v1.input_layer(ids, [W])
+        fun = math_ops.multiply(emb, 2.0, name='multiply')
+        loss = math_ops.reduce_sum(fun, name='reduce_sum')
+        opt = adagrad.AdagradOptimizer(0.1)
+        g_v = opt.compute_gradients(loss)
+        train_op = opt.apply_gradients(g_v)
+        init = variables.global_variables_initializer()
+
+        with self.test_session() as sess:
+          sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_VAR_OPS))
+          sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_SLOT_OPS))
+          sess.run([init])
+          r, _, _ = sess.run([emb, train_op,loss])
+          r, _, _ = sess.run([emb, train_op,loss])
+          r, _, _ = sess.run([emb, train_op,loss])
+          r, _, _ = sess.run([emb, train_op,loss])
+          r, _, _ = sess.run([emb, train_op,loss])
+          return r
+
+      columns = feature_column_v2.categorical_column_with_identity("col_emb", num_buckets=6)
+      emb_columns = feature_column_v2.categorical_column_with_embedding("col_emb", dtype=dtypes.int64)
+
+      columns = feature_column_v2.weighted_categorical_column(columns, 'weight')
+      emb_columns = feature_column_v2.weighted_categorical_column(emb_columns, 'weight')
+
+      W = feature_column_v2.embedding_column(categorical_column=columns, dimension=3,
+                              initializer=init_ops.ones_initializer(dtypes.float32))
+      emb_W = feature_column_v2.embedding_column(categorical_column=emb_columns, dimension=3,
+                              initializer=init_ops.ones_initializer(dtypes.float32))
+
+      emb1 = runTestColumn(W)
+      emb2 = runTestColumn(emb_W)
+
+      for i in range(0, 5):
+        for j in range(0, 3):
+          self.assertEqual(emb1.tolist()[i][j], emb2.tolist()[i][j])
+
+  def testEmbeddingVariableSequenceCategoricalColumn(self):
+    print("testEmbeddingVariableSequenceCategoricalColumn")
+    with ops.device('/cpu:0'):
+      def runTestColumn(W):
+        ids={}
+        ids["col_emb"] = sparse_tensor.SparseTensor(indices=[[0,0],[0,1],[1,1],[2,2],[3,3],[4,3],[4,4]], \
+                            values=math_ops.cast([1,3,2,3,4,5,3], dtypes.int64), dense_shape=[5, 5])
+
+        from tensorflow.contrib.feature_column import sequence_input_layer
+        emb, _ = sequence_input_layer(ids, [W])
+        fun = math_ops.multiply(emb, 2.0, name='multiply')
+        loss = math_ops.reduce_sum(fun, name='reduce_sum')
+        opt = adagrad.AdagradOptimizer(0.1)
+        g_v = opt.compute_gradients(loss)
+        train_op = opt.apply_gradients(g_v)
+        init = variables.global_variables_initializer()
+
+        with self.test_session() as sess:
+          sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_VAR_OPS))
+          sess.run(ops.get_collection(ops.GraphKeys.EV_INIT_SLOT_OPS))
+          sess.run([init])
+          r, _, _ = sess.run([emb, train_op,loss])
+          r, _, _ = sess.run([emb, train_op,loss])
+          r, _, _ = sess.run([emb, train_op,loss])
+          r, _, _ = sess.run([emb, train_op,loss])
+          r, _, _ = sess.run([emb, train_op,loss])
+          return r
+
+      from tensorflow.python.feature_column import sequence_feature_column
+      columns = sequence_feature_column.sequence_categorical_column_with_identity(key="col_emb", num_buckets=6)
+      emb_columns = sequence_feature_column.sequence_categorical_column_with_embedding(key="col_emb", dtype=dtypes.int32)
+
+      W = feature_column_v2.embedding_column(categorical_column=columns, dimension=3,
+                              initializer=init_ops.ones_initializer(dtypes.float32))
+      emb_W = feature_column_v2.embedding_column(categorical_column=emb_columns, dimension=3,
+                                  initializer=init_ops.ones_initializer(dtypes.float32))
+
+      emb1 = runTestColumn(W)
+      emb2 = runTestColumn(emb_W)
+
+      for i in range(0, 5):
         for j in range(0, 3):
           self.assertEqual(emb1.tolist()[i][j], emb2.tolist()[i][j])
 

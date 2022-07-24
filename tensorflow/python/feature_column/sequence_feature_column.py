@@ -35,6 +35,7 @@ from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import check_ops
 from tensorflow.python.ops import parsing_ops
 from tensorflow.python.ops import sparse_ops
+from tensorflow.python.ops import variables
 from tensorflow.python.util.tf_export import keras_export
 from tensorflow.python.util.tf_export import tf_export
 
@@ -429,6 +430,27 @@ def sequence_categorical_column_with_vocabulary_list(
           default_value=default_value,
           num_oov_buckets=num_oov_buckets))
 
+@tf_export('feature_column.sequence_categorical_column_with_embedding')
+def sequence_categorical_column_with_embedding(
+    key, dtype=dtypes.int64, partition_num=None, ev_option=variables.EmbeddingVariableOption()):
+  """A sequence of categorical with embedding variable
+  
+  Args:
+    key: A unique string identifying the input feature.
+    dtype: The type of key during lookup. Only string, int64, int32 types are supported.
+      If `None`, it will be inferred from `tf.dtypes.int64`.
+    partition_num: The num of partition.
+    ev_option: Some EmbeddingVariable based functional parameter configurations 
+
+  Returns:
+    A `SequenceCategoricalColumn`.
+  """
+  return fc.SequenceCategoricalColumn(
+      fc.categorical_column_with_embedding(
+          key=key,
+          dtype=dtype,
+          partition_num=partition_num,
+          ev_option=ev_option))
 
 @tf_export('feature_column.sequence_numeric_column')
 def sequence_numeric_column(

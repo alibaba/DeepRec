@@ -4324,11 +4324,16 @@ class EmbeddingColumn(
                                      trainable):
     """Private method that follows the signature of _get_dense_tensor."""
     embedding_shape = (self.categorical_column._num_buckets, self.dimension)  # pylint: disable=protected-access
+    is_sequence_embedding = isinstance(self.categorical_column, SequenceCategoricalColumn) \
+                              and isinstance(self.categorical_column.categorical_column, EmbeddingCategoricalColumn)
+    is_weight_embedding = isinstance(self.categorical_column, WeightedCategoricalColumn) \
+                              and isinstance(self.categorical_column.categorical_column, EmbeddingCategoricalColumn)
     if (weight_collections and
         ops.GraphKeys.GLOBAL_VARIABLES not in weight_collections):
       weight_collections.append(ops.GraphKeys.GLOBAL_VARIABLES)
     if isinstance(self.categorical_column, AdaptiveEmbeddingCategoricalColumn) \
-      or isinstance(self.categorical_column, EmbeddingCategoricalColumn):
+      or isinstance(self.categorical_column, EmbeddingCategoricalColumn) \
+        or is_sequence_embedding or is_weight_embedding:
       if self.categorical_column.partition_num is None:
         partitioner = None
       else:
@@ -4351,7 +4356,8 @@ class EmbeddingColumn(
         collections=weight_collections)
       return self._get_dense_tensor_internal_adaptive_helper(sparse_tensors,
                                                              hash_embeddings, ev_embeddings)
-    elif isinstance(self.categorical_column, EmbeddingCategoricalColumn):
+    elif isinstance(self.categorical_column, EmbeddingCategoricalColumn) \
+      or is_sequence_embedding or is_weight_embedding:
       embedding_weights = variable_scope.get_embedding_variable_internal(
         name='embedding_weights',
         embedding_dim=self.dimension,
@@ -6852,6 +6858,16 @@ class WeightedCategoricalColumn(
     return self.categorical_column.num_buckets
 
   @property
+  def partition_num(self):
+    """Returns partition num in this sparse feature."""
+    return self.categorical_column.partition_num
+
+  @property
+  def ev_option(self):
+    """Returns EV Option in this sparse feature."""
+    return self.categorical_column.ev_option
+  
+  @property
   @deprecation.deprecated(_FEATURE_COLUMN_DEPRECATION_DATE,
                           _FEATURE_COLUMN_DEPRECATION)
   def _num_buckets(self):
@@ -7540,6 +7556,16 @@ class SequenceCategoricalColumn(
     """Returns number of buckets in this sparse feature."""
     return self.categorical_column.num_buckets
 
+  @property
+  def partition_num(self):
+    """Returns partition num in this sparse feature."""
+    return self.categorical_column.partition_num
+
+  @property
+  def ev_option(self):
+    """Returns EV Option in this sparse feature."""
+    return self.categorical_column.ev_option
+  
   @property
   @deprecation.deprecated(_FEATURE_COLUMN_DEPRECATION_DATE,
                           _FEATURE_COLUMN_DEPRECATION)
